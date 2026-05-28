@@ -5,15 +5,12 @@ Usage: python tui.py
 """
 from __future__ import annotations
 
-import json
-import time
 from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import (
-    Header, Footer, Static, Log, TabbedContent, TabPane,
-    Button, RichLog,
+    Header, Footer, Static, Button, RichLog,
 )
 from textual.binding import Binding
 from textual.timer import Timer

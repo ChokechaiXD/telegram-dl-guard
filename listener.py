@@ -27,7 +27,7 @@ from core.download_handler import (
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir,
 )
-from core.state import load_state, persist_state
+from core.state import load_state
 from rules import load_rules, compile_rules, evaluate_rules
 
 log = logging.getLogger("guard.listener")
@@ -119,7 +119,7 @@ async def _do_download(
     client, msg, fpath: Path, ddir: Path, mt: str, sender: str,
     username: str | None, group_name: str, original_caption: str,
     album_group, file_size: int, upload_queue, dedup_method: str,
-    show_speed: bool,
+    show_speed: bool, today_stats: dict | None = None,
 ) -> bool:
     """Download media file. Returns True on success."""
     async with DL_SEM:
@@ -158,21 +158,23 @@ async def _do_download(
                              group_name, original_caption, album_group)
                         )
                     # Track for TUI
-                    _today["downloaded"] += 1
-                    _today["uploaded"] += 1
-                    _today["bytes"] += sz
-                    _recent_activity.append({"ok": True, "msg": f"{mt} {sender}/{fpath.name} ({sz/1_048_576:.1f}MB)"})
-                    if len(_recent_activity) > 50:
-                        _recent_activity.pop(0)
+                    if today_stats:
+                        today_stats["t"]["downloaded"] += 1
+                        today_stats["t"]["uploaded"] += 1
+                        today_stats["t"]["bytes"] += sz
+                        today_stats["recent"].append({"ok": True, "msg": f"{mt} {sender}/{fpath.name} ({sz/1_048_576:.1f}MB)"})
+                        if len(today_stats["recent"]) > 50:
+                            today_stats["recent"].pop(0)
                     return True
                 else:
                     if fpath.exists() and fpath.stat().st_size == 0:
                         fpath.unlink()
                     # Track failure
-                    _today["failed"] += 1
-                    _recent_activity.append({"ok": False, "msg": f"FAIL {sender}/{fpath.name}"})
-                    if len(_recent_activity) > 50:
-                        _recent_activity.pop(0)
+                    if today_stats:
+                        today_stats["t"]["failed"] += 1
+                        today_stats["recent"].append({"ok": False, "msg": f"FAIL {sender}/{fpath.name}"})
+                        if len(today_stats["recent"]) > 50:
+                            today_stats["recent"].pop(0)
                     return False
 
             except FloodWaitError as e:
@@ -200,7 +202,6 @@ async def run() -> None:
     dh.DL_SEM = asyncio.Semaphore(max(dh.CFG.queue_size, 10))
     CFG = dh.CFG
     DL_DIR = dh.DL_DIR
-    DL_SEM = dh.DL_SEM
 
     _ensure_dir(DL_DIR)
     _ensure_dir(Path("logs"))
@@ -338,11 +339,13 @@ async def run() -> None:
             if fpath is None:
                 continue
 
+            _ts = {"t": _today, "recent": _recent_activity}
             tasks.append(
                 _do_download(
                     client, msg, fpath, ddir, mt, sender, username,
                     group_name, original_caption, first_gid, fsize,
                     upload_queue, CFG.dedup_method, CFG.show_speed,
+                    today_stats=_ts,
                 )
             )
 
@@ -391,10 +394,12 @@ async def run() -> None:
         original_caption = (getattr(msg, "message", None) or "").strip()
         album_group = None  # single messages have no album_group
 
+        _ts = {"t": _today, "recent": _recent_activity}
         ok = await _do_download(
             client, msg, fpath, fpath.parent, mt, sender, username,
             group_name, original_caption, album_group, file_size,
             upload_queue, CFG.dedup_method, CFG.show_speed,
+            today_stats=_ts,
         )
         if ok:
             total += 1
@@ -414,7 +419,6 @@ async def run() -> None:
     _recent_activity: list[dict] = []
 
     async def _ipc_status_loop() -> None:
-        nonlocal total
         from utils import format_bytes
         while _ipc_running:
             uptime = time.time() - _ipc_start
