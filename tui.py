@@ -12,7 +12,6 @@ from textual.containers import Horizontal, Vertical, Container
 from textual.widgets import Header, Footer, Static, Button, RichLog
 from textual.binding import Binding
 from textual.timer import Timer
-from textual import on
 
 from core.ipc import read_status, write_command, read_logs
 
@@ -75,20 +74,16 @@ class Controls(Horizontal):
         yield Button("Pause", id="btn-pause", variant="warning")
         yield Button("Restart", id="btn-restart", variant="primary")
 
-    @on(Button.Pressed, "#btn-start")
-    def _on_start(self) -> None:
-        write_command({"action": "resume"})
-        print("BUTTON: resume sent")
-
-    @on(Button.Pressed, "#btn-pause")
-    def _on_pause(self) -> None:
-        write_command({"action": "pause"})
-        print("BUTTON: pause sent")
-
-    @on(Button.Pressed, "#btn-restart")
-    def _on_restart(self) -> None:
-        write_command({"action": "restart"})
-        print("BUTTON: restart sent")
+    def on_button_pressed(self, event) -> None:
+        btn = event.button
+        btn_id = getattr(btn, 'id', '')
+        print(f"DEBUG: button pressed id={btn_id}")
+        if btn_id == "btn-start":
+            write_command({"action": "resume"})
+        elif btn_id == "btn-pause":
+            write_command({"action": "pause"})
+        elif btn_id == "btn-restart":
+            write_command({"action": "restart"})
 
 
 class GuardApp(App):
