@@ -8,17 +8,13 @@ from __future__ import annotations
 from datetime import datetime
 
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import (
-    Header, Footer, Static, Button, RichLog,
-)
+from textual.containers import Horizontal, Vertical, Container
+from textual.widgets import Header, Footer, Static, Button, RichLog
 from textual.binding import Binding
 from textual.timer import Timer
+from textual import on
 
 from core.ipc import read_status, write_command, read_logs
-
-
-# ── Status Panel ──────────────────────────────────────────────
 
 
 class StatusPanel(Static):
@@ -30,10 +26,10 @@ class StatusPanel(Static):
         yield Static("", id="status-text")
 
     def on_mount(self) -> None:
-        self._update_log()
-        self.timer = self.set_interval(2, self.refresh)
+        self._refresh()
+        self.timer = self.set_interval(3, self._refresh)
 
-    def _update_log(self) -> None:
+    def _refresh(self, **kwargs) -> None:
         s = read_status()
         running = s.get("running", False)
         paused = s.get("paused", False)
@@ -48,9 +44,6 @@ class StatusPanel(Static):
         )
 
 
-# ── Activity Panel ────────────────────────────────────────────
-
-
 class ActivityPanel(RichLog):
     """Shows recent activity log."""
 
@@ -63,10 +56,7 @@ class ActivityPanel(RichLog):
 
     def _update_log(self, **kwargs) -> None:
         logs = read_logs(50)
-        try:
-            self._line_cache.clear()
-        except Exception:
-            pass
+        self.clear()
         from rich.text import Text
         for entry in logs:
             ts = datetime.fromtimestamp(entry.get("t", 0)).strftime("%H:%M:%S")
@@ -77,10 +67,7 @@ class ActivityPanel(RichLog):
             self.write(line)
 
 
-# ── Controls ──────────────────────────────────────────────────
-
-
-class Controls(Static):
+class Controls(Horizontal):
     """Action buttons."""
 
     def compose(self) -> ComposeResult:
@@ -88,17 +75,20 @@ class Controls(Static):
         yield Button("Pause", id="btn-pause", variant="warning")
         yield Button("Restart", id="btn-restart", variant="primary")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        btn_id = event.button.id
-        if btn_id == "btn-start":
-            write_command({"action": "resume"})
-        elif btn_id == "btn-pause":
-            write_command({"action": "pause"})
-        elif btn_id == "btn-restart":
-            write_command({"action": "restart"})
+    @on(Button.Pressed, "#btn-start")
+    def _on_start(self) -> None:
+        write_command({"action": "resume"})
+        print("BUTTON: resume sent")
 
+    @on(Button.Pressed, "#btn-pause")
+    def _on_pause(self) -> None:
+        write_command({"action": "pause"})
+        print("BUTTON: pause sent")
 
-# ── Main App ──────────────────────────────────────────────────
+    @on(Button.Pressed, "#btn-restart")
+    def _on_restart(self) -> None:
+        write_command({"action": "restart"})
+        print("BUTTON: restart sent")
 
 
 class GuardApp(App):
@@ -121,6 +111,7 @@ class GuardApp(App):
         Binding("s", "cmd_start", "Start"),
         Binding("p", "cmd_pause", "Pause"),
         Binding("r", "cmd_restart", "Restart"),
+        Binding("c", "cmd_config", "Config"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -136,12 +127,18 @@ class GuardApp(App):
 
     def action_cmd_start(self) -> None:
         write_command({"action": "resume"})
+        print("KEY: resume")
 
     def action_cmd_pause(self) -> None:
         write_command({"action": "pause"})
+        print("KEY: pause")
 
     def action_cmd_restart(self) -> None:
         write_command({"action": "restart"})
+        print("KEY: restart")
+
+    def action_cmd_config(self) -> None:
+        self.bell()  # placeholder
 
 
 if __name__ == "__main__":
