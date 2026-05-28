@@ -21,8 +21,9 @@ from telethon.sessions import StringSession
 
 from config import AppConfig
 from core.cleanup import _cleanup_task
+import core.download_handler as dh
 from core.download_handler import (
-    DL_SEM, _cfg, _extract_peer_id, _file_hash,
+    _cfg, _extract_peer_id, _file_hash,
     _fmt_speed, _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir,
@@ -122,7 +123,7 @@ async def _do_download(
     show_speed: bool, today_stats: dict | None = None,
 ) -> bool:
     """Download media file. Returns True on success."""
-    async with DL_SEM:
+    async with dh.DL_SEM:
         _ensure_dir(ddir)
         t0 = asyncio.get_event_loop().time()
 
@@ -460,7 +461,7 @@ async def run() -> None:
     asyncio.create_task(_ipc_command_loop())
 
     total = 0
-    print(f"  Listening... (Ctrl+C to stop)\n")
+    print("  Listening... (Ctrl+C to stop)\n")
     sys.stdout.flush()
 
     if not await client.is_user_authorized():
