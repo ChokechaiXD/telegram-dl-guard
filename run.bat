@@ -1,53 +1,58 @@
 @echo off
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
+title Telegram DL Guard
 
 if not exist venv\Scripts\python.exe (
-    echo [SETUP] Creating venv and installing dependencies...
+    echo [SETUP] Creating venv...
     python -m venv venv
     call venv\Scripts\pip install -r requirements.txt
-    echo [OK] Ready.
-    echo.
+    echo [OK]
+    goto menu
 )
+if "%~1"=="" goto menu
 
-echo ========================================
-echo   Telegram DL Guard v3.9
-echo ========================================
-echo.
-echo   [1] Start listener (Guard mode)
-echo   [2] Interactive dashboard (TUI)
-echo   [3] First-run setup wizard
-echo   [4] Settings menu
-echo   [0] Exit
-echo.
-set /p choice="  Choose: "
+if "%~1"=="1" goto listen
+if "%~1"=="2" goto tui
+if "%~1"=="3" goto setup
+if "%~1"=="4" goto guard
+goto menu
 
-if "%choice%"=="1" goto listen
-if "%choice%"=="2" goto tui
-if "%choice%"=="3" goto setup
-if "%choice%"=="4" goto settings
-if "%choice%"=="0" goto :eof
-goto :eof
+:menu
+echo ========================================
+echo   Telegram DL Guard
+echo ========================================
+echo   1 — Start listener
+echo   2 — Interactive TUI
+echo   3 — Setup wizard
+echo   4 — Settings
+echo   0 — Exit
+echo ========================================
+set /p c="> "
+if "%c%"=="1" goto listen
+if "%c%"=="2" goto tui
+if "%c%"=="3" goto setup
+if "%c%"=="4" goto guard
+if "%c%"=="0" exit /b
+goto menu
 
 :listen
-echo [Starting Listener — press Ctrl+C to stop]
 set PYTHONUNBUFFERED=1
 venv\Scripts\python guard.py --listen
 pause
-goto :eof
+goto menu
 
 :tui
-echo [Starting TUI — press q to quit]
 set PYTHONUNBUFFERED=1
 venv\Scripts\python tui.py
-goto :eof
+goto menu
 
 :setup
-call venv\Scripts\python guard.py --setup
+venv\Scripts\python guard.py --setup
 pause
-goto :eof
+goto menu
 
-:settings
-call venv\Scripts\python guard.py
+:guard
+venv\Scripts\python guard.py
 pause
-goto :eof
+goto menu
