@@ -11,6 +11,7 @@ import logging
 import os
 import signal as _signal
 import sys
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -21,24 +22,23 @@ from telethon.sessions import StringSession
 from config import AppConfig
 from core.cleanup import _cleanup_task
 from core.download_handler import (
-    DL_DIR, DL_SEM, CFG, _cfg, _extract_peer_id, _file_hash,
-    _fmt_speed, _group_name_cache, _hashes, _media_name,
+    DL_SEM, _cfg, _extract_peer_id, _file_hash,
+    _fmt_speed, _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir,
 )
-from core.filter_engine import FilterEngine
 from core.state import load_state, persist_state
 from rules import load_rules, compile_rules, evaluate_rules
 
 log = logging.getLogger("guard.listener")
-_MAX_PROCESSED_IDS = 50000
+_MAX_PROCESSED = 50000
 
 
-# ── Dedup cache: OrderedDict for O(1) + auto-evict ────────────
+# ── Dedup cache ─────────────────────────────────────────────────
 
 
 class _DedupCache(OrderedDict):
-    def __init__(self, maxsize: int = _MAX_PROCESSED_IDS):
+    def __init__(self, maxsize: int = _MAX_PROCESSED):
         super().__init__()
         self._maxsize = maxsize
 
@@ -72,15 +72,14 @@ async def connect_retry(client: TelegramClient, retries: int = 10, base: float =
     return False
 
 
-# ── Message pre-check (shared by NewMessage + Album) ────────────
+# ── Pre-check (shared) ──────────────────────────────────────────
 
 
 async def _pre_check(
     event, msg, peer_ids: set[int], media_set: set[str],
     blocked: list[str], min_file_size: int,
-) -> tuple[str, str, str, str, int] | None:
-    """Validate message. Returns (sender, username, group_name, media_type, file_size) or None to skip."""
-
+) -> tuple[str, str | None, str, str, int] | None:
+    """Validate message. Returns (sender, username, group_name, media_type, file_size) or skip."""
     # Peer filter
     pid = _extract_peer_id(msg)
     if peer_ids and pid and pid not in peer_ids:
@@ -88,8 +87,7 @@ async def _pre_check(
     if peer_ids and pid is None:
         try:
             chat = await event.get_chat()
-            chat_id = getattr(chat, "id", None)
-            if chat_id and chat_id not in peer_ids:
+            if getattr(chat, "id", None) not in peer_ids:
                 return None
         except Exception:
             return None
@@ -107,7 +105,6 @@ async def _pre_check(
         return None
 
     file_size = getattr(getattr(msg.media, "document", None), "size", 0) or 0
-
     if min_file_size > 0 and mt != "photo" and file_size < min_file_size * 1024:
         return None
 
@@ -118,9 +115,9 @@ async def _pre_check(
 # ── Download + queue ───────────────────────────────────────────
 
 
-async def _download_and_queue(
+async def _do_download(
     client, msg, fpath: Path, ddir: Path, mt: str, sender: str,
-    username: str, group_name: str, original_caption: str,
+    username: str | None, group_name: str, original_caption: str,
     album_group, file_size: int, upload_queue, dedup_method: str,
     show_speed: bool,
 ) -> bool:
@@ -160,10 +157,22 @@ async def _download_and_queue(
                             (str(fpath), sender, username, msg.date,
                              group_name, original_caption, album_group)
                         )
+                    # Track for TUI
+                    _today["downloaded"] += 1
+                    _today["uploaded"] += 1
+                    _today["bytes"] += sz
+                    _recent_activity.append({"ok": True, "msg": f"{mt} {sender}/{fpath.name} ({sz/1_048_576:.1f}MB)"})
+                    if len(_recent_activity) > 50:
+                        _recent_activity.pop(0)
                     return True
                 else:
                     if fpath.exists() and fpath.stat().st_size == 0:
                         fpath.unlink()
+                    # Track failure
+                    _today["failed"] += 1
+                    _recent_activity.append({"ok": False, "msg": f"FAIL {sender}/{fpath.name}"})
+                    if len(_recent_activity) > 50:
+                        _recent_activity.pop(0)
                     return False
 
             except FloodWaitError as e:
@@ -199,8 +208,13 @@ async def run() -> None:
     # State
     processed = _DedupCache()
     state_processed, _group_name_cache = load_state()
-    for mid in state_processed:
-        processed.add(mid)
+    # Fix #3: state_processed is a list of ints from load_state()
+    if isinstance(state_processed, dict):
+        for mid in state_processed:
+            processed.add(int(mid))
+    else:
+        for mid in state_processed:
+            processed.add(int(mid))
     dh._group_name_cache = _group_name_cache
 
     # Rules
@@ -209,9 +223,9 @@ async def run() -> None:
         print(f"  Rules: {len(_rules)} rules loaded")
 
     # Filters
-    fe = FilterEngine(CFG.target_groups, CFG.media_types)
     media_set = {t.strip() for t in CFG.media_types.split(",") if t.strip()}
     blocked = [s.strip().lower() for s in CFG.blocked_senders.split(",") if s.strip()] if CFG.blocked_senders else []
+    # Fix #4: removed unused fe = FilterEngine(...)
 
     # Client
     client = TelegramClient(
@@ -230,7 +244,6 @@ async def run() -> None:
         print("  No valid groups.")
         return
 
-    # Warn about history.py being stubbed
     if CFG.history_enabled:
         log.warning("History scan enabled but history.py unavailable")
 
@@ -254,56 +267,30 @@ async def run() -> None:
         print("  Upload: disabled")
 
     asyncio.create_task(_cleanup_task(_cfg))
-    sys.stdout.flush()
 
-    total = 0
+    # Config hot-reload
+    from core.config_reloader import ConfigReloader
+    _reloader = ConfigReloader()
+    asyncio.create_task(_reloader.start())
+
+    # Commands (Telegram)
+    from core.commands import CommandHandler
+    _cmd_handler = CommandHandler()
+    asyncio.create_task(_cmd_handler.start(client))
+
+    sys.stdout.flush()
 
     def _persist():
         from core.state import persist_state
-        # Convert OrderedDict to dict for persistence
-        state_dict = dict(processed)
-        persist_state(state_dict, _group_name_cache)
+        persist_state(dict(processed), _group_name_cache)
 
     atexit.register(_persist)
 
     # ── Event handlers ─────────────────────────────────────────
 
-    @client.on(events.NewMessage)
-    async def _on_msg(event) -> None:
-        nonlocal total
-        msg = event.message
-        if msg.id in processed:
-            return
-        processed.add(msg.id)
-
-        r = await _pre_check(event, msg, peer_ids, media_set, blocked, CFG.min_file_size)
-        if r is None:
-            return
-        sender, username, group_name, mt, file_size = r
-
-        # Rule engine
-        fname = _media_name(msg.media, msg.date, msg.id)
-        if _rules:
-            rule_action = evaluate_rules(_rules, sender, fname, mt, file_size, group_name)
-            if rule_action and rule_action.skip:
-                return
-
-        fpath = DL_DIR / _sanitize_group(group_name) / sender / fname
-        fpath = _resolve_download_path(fpath, file_size or None, msg.id)
-        if fpath is None:
-            return
-
-        original_caption = (getattr(msg, "message", None) or "").strip()
-        album_group = getattr(msg, "grouped_id", None)
-
-        ok = await _download_and_queue(
-            client, msg, fpath, fpath.parent, mt, sender, username,
-            group_name, original_caption, album_group, file_size,
-            upload_queue, CFG.dedup_method, CFG.show_speed,
-        )
-        if ok:
-            total += 1
-
+    # Fix #6: Album handler registered FIRST so Telethon processes album events
+    # before NewMessage. Album has grouped_id which includes all items.
+    # NewMessage handler skips items that have grouped_id (they belong to album).
     @client.on(events.Album)
     async def _on_album(event) -> None:
         nonlocal total
@@ -314,15 +301,18 @@ async def run() -> None:
         first_msg = msgs[0]
         first_gid = getattr(first_msg, "grouped_id", None)
 
-        # Pre-check only the first message
+        # Pre-check first message
+        if _cmd_handler.is_paused():
+            for m in msgs:
+                processed.add(m.id)
+            return
+
         r = await _pre_check(event, first_msg, peer_ids, media_set, blocked, CFG.min_file_size)
         if r is None:
-            # Mark all as processed to avoid re-processing
-            for msg in msgs:
-                processed.add(msg.id)
+            for m in msgs:
+                processed.add(m.id)
             return
         sender, username, group_name, _, _ = r
-
         original_caption = (getattr(first_msg, "message", None) or "").strip()
         ddir = DL_DIR / _sanitize_group(group_name) / sender
         _ensure_dir(ddir)
@@ -349,7 +339,7 @@ async def run() -> None:
                 continue
 
             tasks.append(
-                _download_and_queue(
+                _do_download(
                     client, msg, fpath, ddir, mt, sender, username,
                     group_name, original_caption, first_gid, fsize,
                     upload_queue, CFG.dedup_method, CFG.show_speed,
@@ -363,12 +353,109 @@ async def run() -> None:
                 if ok is True:
                     total += 1
                 elif isinstance(ok, Exception):
-                    log.error("Album download error: %s", ok)
+                    log.error("Album error: %s", ok)
+
+    @client.on(events.NewMessage)
+    async def _on_msg(event) -> None:
+        nonlocal total
+        msg = event.message
+
+        # Fix #6: Skip album items (they are handled by _on_album)
+        if getattr(msg, "grouped_id", None) is not None:
+            return
+
+        if msg.id in processed:
+            return
+        processed.add(msg.id)
+
+        if _cmd_handler.is_paused():
+            return
+
+        r = await _pre_check(event, msg, peer_ids, media_set, blocked, CFG.min_file_size)
+        if r is None:
+            return
+        sender, username, group_name, mt, file_size = r
+
+        # Rule engine
+        fname = _media_name(msg.media, msg.date, msg.id)
+        if _rules:
+            rule_action = evaluate_rules(_rules, sender, fname, mt, file_size, group_name)
+            if rule_action and rule_action.skip:
+                return
+
+        fpath = DL_DIR / _sanitize_group(group_name) / sender / fname
+        fpath = _resolve_download_path(fpath, file_size or None, msg.id)
+        if fpath is None:
+            return
+
+        original_caption = (getattr(msg, "message", None) or "").strip()
+        album_group = None  # single messages have no album_group
+
+        ok = await _do_download(
+            client, msg, fpath, fpath.parent, mt, sender, username,
+            group_name, original_caption, album_group, file_size,
+            upload_queue, CFG.dedup_method, CFG.show_speed,
+        )
+        if ok:
+            total += 1
 
     # ── Start listening ────────────────────────────────────────
 
     me = await client.get_me()
+    _cmd_handler.set_user(me.id)
     print(f"\n  Logged in as: {me.first_name}")
+
+    # IPC — status writer + command reader
+    from core.ipc import write_status, read_command, append_log
+    _ipc_running = True
+    _ipc_start = time.time()
+    _ipc_me = me
+    _today = {"downloaded": 0, "uploaded": 0, "failed": 0, "bytes": 0}
+    _recent_activity: list[dict] = []
+
+    async def _ipc_status_loop() -> None:
+        nonlocal total
+        from utils import format_bytes
+        while _ipc_running:
+            uptime = time.time() - _ipc_start
+            s = {
+                "running": True, "paused": _cmd_handler.is_paused(),
+                "uptime": int(uptime), "processed": total,
+                "user": _ipc_me.first_name,
+                "storage_group": CFG.storage_group_id,
+                "target_groups": CFG.target_groups,
+                "upload_mode": os.getenv("UPLOAD_MODE", "realtime_keep"),
+                "media_types": CFG.media_types, "queue_size": CFG.queue_size,
+                "today_downloaded": _today["downloaded"],
+                "today_uploaded": _today["uploaded"],
+                "today_failed": _today["failed"],
+                "today_size": format_bytes(_today["bytes"]),
+                "storage_total": 0, "storage_uploaded": 0,
+                "storage_pending": 0, "storage_size": "0 B",
+                "recent": _recent_activity[-10:],
+            }
+            write_status(s)
+            await asyncio.sleep(3)
+
+    async def _ipc_command_loop() -> None:
+        while _ipc_running:
+            cmd = read_command()
+            if cmd:
+                action = cmd.get("action")
+                if action == "pause":
+                    _cmd_handler._paused = True
+                    append_log("Paused via TUI")
+                elif action == "resume":
+                    _cmd_handler._paused = False
+                    append_log("Resumed via TUI")
+                elif action == "restart":
+                    append_log("Restart requested via TUI")
+            await asyncio.sleep(1)
+
+    asyncio.create_task(_ipc_status_loop())
+    asyncio.create_task(_ipc_command_loop())
+
+    total = 0
     print(f"  Listening... (Ctrl+C to stop)\n")
     sys.stdout.flush()
 
@@ -380,7 +467,6 @@ async def run() -> None:
     shutdown = asyncio.Event()
 
     def _sig_handler(sig, frame):
-        log.info("Signal %s", sig)
         shutdown.set()
 
     try:
@@ -415,7 +501,6 @@ async def run() -> None:
 
 
 def _sanitize_group(name: str) -> str:
-    """Fallback sanitize — import may not always be available."""
     try:
         from utils import sanitize_group
         return sanitize_group(name)
