@@ -63,13 +63,18 @@ class ActivityPanel(RichLog):
 
     def refresh(self) -> None:
         logs = read_logs(50)
-        self.clear()
+        try:
+            self._line_cache.clear()
+        except Exception:
+            pass
+        from rich.text import Text
         for entry in logs:
             ts = datetime.fromtimestamp(entry.get("t", 0)).strftime("%H:%M:%S")
             msg = entry.get("msg", "")
             level = entry.get("level", "info")
             style = "red" if level == "error" else ("yellow" if level == "warning" else "green")
-            self.write(f"[{ts}] {msg}", style=style)
+            line = Text(f"[{ts}] {msg}\n", style=style)
+            self.write(line)
 
 
 # ── Controls ──────────────────────────────────────────────────

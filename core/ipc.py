@@ -92,9 +92,9 @@ def append_log(message: str, level: str = "info") -> None:
 
 
 def read_logs(limit: int = 50) -> list[dict[str, Any]]:
-    if not LOG_FILE.exists():
-        return []
     try:
+        if not LOG_FILE.is_file():
+            return []
         lines = LOG_FILE.read_text(encoding="utf-8").strip().split("\n")
         result = []
         for line in reversed(lines[-limit:]):
