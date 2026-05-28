@@ -30,10 +30,10 @@ class StatusPanel(Static):
         yield Static("", id="status-text")
 
     def on_mount(self) -> None:
-        self.refresh()
+        self._update_log()
         self.timer = self.set_interval(2, self.refresh)
 
-    def refresh(self) -> None:
+    def _update_log(self) -> None:
         s = read_status()
         running = s.get("running", False)
         paused = s.get("paused", False)
@@ -58,10 +58,10 @@ class ActivityPanel(RichLog):
 
     def on_mount(self) -> None:
         self.wrap = True
-        self.refresh()
-        self.timer = self.set_interval(1, self.refresh)
+        self._update_log()
+        self.timer = self.set_interval(2, self._update_log)
 
-    def refresh(self) -> None:
+    def _update_log(self, **kwargs) -> None:
         logs = read_logs(50)
         try:
             self._line_cache.clear()
