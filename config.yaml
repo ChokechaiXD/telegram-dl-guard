@@ -1,0 +1,45 @@
+api_id: 31016531
+api_hash: "0a2546270507377e5e467967010de46c"
+session_string: ""
+target_groups: "-1003538211705"
+media_types: "photo,video"
+download_dir: "./downloads"
+folder_date_format: "%Y%m%d_%H%M"
+
+dedup:
+  enabled: true
+  method: "size"
+  redownload: "never"
+
+# Filename format (when media has no original filename)
+# "datetime"  → 20260526_213349_photo.jpg
+# "unique"    → 20260526_213349_photo_44402.jpg  (always unique)
+filename_format: "datetime"
+
+# History scan on startup
+history:
+  enabled: false
+  hours: 24           # Scan last N hours (max 48)
+  mode: "list"        # "list" = show list & let user choose | "auto" = download all new
+  reverse: true       # true = oldest first, false = newest first
+
+download:
+  max_concurrent: 3
+
+cleanup:
+  enabled: false
+  retention_days: 30
+  interval_hours: 6
+
+# Auto-upload to storage group/channel
+storage_group_id: ""
+upload:
+  enabled: false
+
+display:
+  show_speed: true
+  show_eta: true
+
+log:
+  level: "INFO"
+  file: true

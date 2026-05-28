@@ -1,0 +1,18 @@
+# Secrets
+.env
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Local data
+downloads/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

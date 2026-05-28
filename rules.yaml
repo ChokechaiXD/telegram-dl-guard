@@ -1,0 +1,56 @@
+# Rule Engine Configuration
+# Each rule: when condition matches → execute action
+#
+# Conditions (all must match, AND logic):
+#   sender          - exact match (case-insensitive)
+#   sender_contains - substring match
+#   filename_regex  - regex pattern match
+#   media_type      - photo | video | doc
+#   file_size_gt    - file size greater than (bytes)
+#   file_size_lt    - file size less than (bytes)
+#   source_group    - exact match on source group name
+#
+# Actions (only first matching rule applies):
+#   skip      - do not download/upload
+#   tag       - add tag for categorization
+#   album     - upload as album thread
+#   priority  - upload immediately (skip queue)
+#   move_to   - move to folder after download
+
+rules:
+  # Skip tiny documents (likely spam)
+  - name: "Skip small docs"
+    when:
+      media_type: "doc"
+      file_size_lt: 102400  # 100KB
+    action:
+      skip: true
+
+  # Auto-album for specific senders
+  - name: "VIP album"
+    when:
+      sender_contains: "john"
+    action:
+      album: true
+
+  # Tag NSFW content
+  - name: "Tag NSFW"
+    when:
+      filename_regex: "(nsfw|xxx|18\\+)"
+    action:
+      tag: "nsfw"
+
+  # Skip large videos (>50MB) to save bandwidth
+  - name: "Skip large videos"
+    when:
+      media_type: "video"
+      file_size_gt: 52428800  # 50MB
+    action:
+      skip: true
+
+  # Priority upload for specific group
+  - name: "Priority from main group"
+    when:
+      source_group: "Main Group"
+    action:
+      priority: true
