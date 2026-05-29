@@ -334,11 +334,17 @@ Input:focus, Select:focus, TextArea:focus {
 }
 
 .selective-row {
+    background: #11151c;
+    border: solid #1f2937;
+    padding: 1 2;
+    margin-bottom: 1;
     height: auto;
     align: left middle;
-    margin-bottom: 1;
-    border-bottom: solid #1f2937;
-    padding-bottom: 1;
+}
+
+.selective-row:hover {
+    border: solid #58a6ff;
+    background: #1c212a;
 }
 
 .selective-row Checkbox {

@@ -21,6 +21,17 @@ from core.utils import format_bytes
 
 from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, RulesBuilderContainer, SelectiveDownloaderContainer
 
+class SelectiveRow(Horizontal):
+    """Clickable card box representing a fetched media item for selective downloader."""
+    def on_click(self, event) -> None:
+        if hasattr(event, "target") and event.target.__class__.__name__ == "Checkbox":
+            return
+        try:
+            chk = self.query_one(Checkbox)
+            chk.value = not chk.value
+        except Exception:
+            pass
+
 class GuardApp(App):
     """Telegram DL Guard — Interactive TUI with dynamic dashboard, gallery, and setup."""
 
@@ -819,15 +830,34 @@ class GuardApp(App):
                 
                 date_str = msg.date.strftime("%Y-%m-%d %H:%M") if msg.date else "?"
                 
+                # Format Caption preview
+                caption_text = msg.message.strip() if msg.message else ""
+                if caption_text:
+                    caption_preview = f"Caption: [dim]{caption_text[:45]}...[/]"
+                else:
+                    caption_preview = "[dim](No caption)[/]"
+                
+                # Visual symbols and color coding
+                if mt == "photo":
+                    media_icon = "■ PHOTO"
+                    color = "green"
+                elif mt == "video":
+                    media_icon = "▲ VIDEO"
+                    color = "cyan"
+                else:
+                    media_icon = "● DOCUMENT"
+                    color = "yellow"
+                
                 content = (
-                    f"[bold cyan]{idx + 1}. {fname[:36]}[/] [dim]({size_str})[/]\n"
-                    f"[dim]Sender:[/] {sender} | [dim]Date:[/] {date_str} | [dim]Format:[/] {mt.upper()}"
+                    f"[bold {color}]{media_icon}[/] | [bold]{idx + 1}. {fname[:36]}[/] [dim]({size_str})[/]\n"
+                    f" └─ {caption_preview}\n"
+                    f"    [dim]From:[/] {sender} | [dim]Date:[/] {date_str}"
                 )
                 
                 card_text = Static(content, classes="rule-card-info")
                 checkbox = Checkbox(value=False, id=f"grp_check_{msg.id}")
                 
-                row = Horizontal(
+                row = SelectiveRow(
                     checkbox, card_text,
                     classes="rule-card-row selective-row", id=f"sel-row-{msg.id}"
                 )
