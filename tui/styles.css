@@ -40,13 +40,14 @@ Screen {
 }
 
 #left-panel {
-    width: 38%;
+    width: 40%;
+    min-width: 38;
     height: 1fr;
     padding: 0 1;
 }
 
 #right-panel {
-    width: 62%;
+    width: 1fr;
     height: 1fr;
     padding: 0 1;
 }
@@ -90,10 +91,11 @@ Screen {
 .controls-row {
     height: auto;
     align: center middle;
+    margin-bottom: 1;
 }
 
 .controls-row Button {
-    width: 14;
+    width: 1fr;
     margin: 0 1;
 }
 
@@ -124,13 +126,13 @@ Screen {
 }
 
 .setting-row Input {
-    width: 50%;
+    width: 1fr;
     background: #090b0f;
     border: solid #1f2937;
 }
 
 .setting-row Select {
-    width: 50%;
+    width: 1fr;
     background: #090b0f;
     border: solid #1f2937;
 }
@@ -172,16 +174,17 @@ Screen {
 }
 
 .dl-info {
-    width: 78%;
+    width: 1fr;
     color: #c9d1d9;
 }
 
 .btn-dl-cancel {
-    width: 14;
-    margin-left: 2;
+    width: 12;
+    margin-left: 1;
 }
 
 .raw-text-area {
+    width: 100%;
     height: 18;
     background: #07090e;
     color: #c9d1d9;
@@ -200,4 +203,9 @@ Screen {
 .settings-raw-actions Button {
     margin: 0 1;
     width: 20;
+}
+
+/* Premium Focus Highlighting */
+Input:focus, Select:focus, TextArea:focus {
+    border: double #58a6ff;
 }
