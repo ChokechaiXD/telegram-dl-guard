@@ -82,7 +82,6 @@ class GuardApp(App):
         self.client: Any | None = None
         self._is_online = False
         asyncio.create_task(self._monitor_connection())
-        asyncio.create_task(self.start_listener_engine())
 
     async def _monitor_connection(self) -> None:
         while True:
@@ -132,6 +131,7 @@ class GuardApp(App):
             logging.getLogger("guard").error(f"Listener engine crashed: {e}")
         finally:
             self._is_online = False
+            self.listener_task = None
             if self.client:
                 try:
                     await self.client.disconnect()
@@ -842,8 +842,12 @@ class GuardApp(App):
             return
 
         if btn_id == "btn-start":
-            GLOBAL_STATUS["paused"] = False
-            self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
+            if not self.listener_task:
+                self.notify("Starting Telegram DL Guard Listener Engine...", title="Status Update")
+                asyncio.create_task(self.start_listener_engine())
+            else:
+                GLOBAL_STATUS["paused"] = False
+                self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
         elif btn_id == "btn-pause":
             GLOBAL_STATUS["paused"] = True
             self.notify("Paused Telegram DL Guard Listener.", title="Status Update", severity="warning")
@@ -866,8 +870,12 @@ class GuardApp(App):
             self.save_raw_file_from_ui()
 
     def action_cmd_start(self) -> None:
-        GLOBAL_STATUS["paused"] = False
-        self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
+        if not self.listener_task:
+            self.notify("Starting Telegram DL Guard Listener Engine...", title="Status Update")
+            asyncio.create_task(self.start_listener_engine())
+        else:
+            GLOBAL_STATUS["paused"] = False
+            self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
 
     def action_cmd_pause(self) -> None:
         GLOBAL_STATUS["paused"] = True
