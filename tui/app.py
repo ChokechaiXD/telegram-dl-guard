@@ -721,9 +721,28 @@ class GuardApp(App):
         except Exception as e:
             logging.getLogger("guard").error(f"Failed to refresh analytics screen: {e}")
 
+    async def ensure_client_connected(self) -> bool:
+        """Ensures the Telegram background client is connected. Returns True if successful."""
+        if self.client and self._background_loop and self._background_loop.is_running() and getattr(self, "_is_online", False):
+            return True
+
+        from config import AppConfig
+        cfg = AppConfig.load()
+        if not (cfg.session_string and cfg.api_id and cfg.api_hash):
+            return False
+
+        self.notify("Connecting to Telegram in the background...", title="Auto Connecting")
+        self.start_listener_engine()
+        # Wait up to 5 seconds for client to connect
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            if self.client and self._background_loop and self._background_loop.is_running() and getattr(self, "_is_online", False):
+                return True
+        return False
+
     async def fetch_history_media(self) -> None:
-        if not self.client or not self._background_loop or not self._background_loop.is_running():
-            self.notify("Telegram client not connected or logged in.", severity="error", title="Fetch Failed")
+        if not await self.ensure_client_connected():
+            self.notify("Telegram client is not connected. Please click 'Start' on Dashboard.", severity="error", title="Connection Failed")
             return
             
         group_id_val = self.query_one("#selective-group-id", Select).value
@@ -821,8 +840,8 @@ class GuardApp(App):
             logging.getLogger("guard").error(f"Failed to fetch history: {e}")
 
     async def download_selected_media(self) -> None:
-        if not self.client or not self._background_loop or not self._background_loop.is_running():
-            self.notify("Telegram client not connected.", severity="error")
+        if not await self.ensure_client_connected():
+            self.notify("Telegram client is not connected. Please click 'Start' on Dashboard.", severity="error", title="Connection Failed")
             return
             
         box = self.query_one("#selective-media-list")
