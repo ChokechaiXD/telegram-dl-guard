@@ -109,7 +109,10 @@ async def _first_run_wizard() -> None:
     cfg = AppConfig.load()
 
     # Step 1: API credentials
-    if not cfg.api_id or not cfg.api_hash:
+    if cfg.api_id and cfg.api_hash:
+        print("  Step 1: API Credentials")
+        print(f"  [INFO] API Credentials loaded: ID={cfg.api_id}")
+    else:
         print("  Step 1: API Credentials")
         print("  Go to https://my.telegram.org/apps to get API_ID and API_HASH")
         aid = input("  API_ID: ").strip()
@@ -121,7 +124,27 @@ async def _first_run_wizard() -> None:
         cfg = AppConfig.load()
 
     # Step 2: Login
-    if not _is_logged_in():
+    if _is_logged_in():
+        print("\n  Step 2: Login to Telegram")
+        try:
+            cli = TelegramClient(StringSession(cfg.session_string), cfg.api_id, cfg.api_hash)
+            await cli.connect()
+            if await cli.is_user_authorized():
+                me = await cli.get_me()
+                print(f"  [INFO] Active Telegram session found. (Logged in as: {me.first_name})")
+            else:
+                print("  [WARNING] Session found but it is unauthorized/expired.")
+            await cli.disconnect()
+        except Exception:
+            print("  [INFO] Active Telegram session found. (Already logged in)")
+        
+        relogin = input("  Do you want to re-login? (y/N): ").strip().lower()
+        if relogin == 'y':
+            await _do_login()
+            cfg = AppConfig.load()
+        else:
+            print("  [OK] Keeping current Telegram login session.")
+    else:
         print("\n  Step 2: Login to Telegram")
         await _do_login()
         cfg = AppConfig.load()

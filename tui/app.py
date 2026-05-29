@@ -106,6 +106,35 @@ class GuardApp(App):
         self.client: Any | None = None
         self._is_online = False
         asyncio.create_task(self._monitor_connection())
+        asyncio.create_task(self.prefetch_user_info())
+
+    async def prefetch_user_info(self) -> None:
+        from core.state import GLOBAL_STATUS
+        from config import AppConfig
+        cfg = AppConfig.load()
+        if cfg.session_string and cfg.api_id and cfg.api_hash:
+            try:
+                from telethon import TelegramClient
+                from telethon.sessions import StringSession
+                
+                # Check if we already have the user info
+                if GLOBAL_STATUS.get("user") != "?":
+                    return
+
+                cli = TelegramClient(
+                    StringSession(cfg.session_string),
+                    cfg.api_id, cfg.api_hash,
+                    connection_retries=1, retry_delay=1, auto_reconnect=False
+                )
+                await cli.connect()
+                if await cli.is_user_authorized():
+                    me = await cli.get_me()
+                    if me:
+                        GLOBAL_STATUS["user"] = me.first_name
+                        self._refresh_dashboard()
+                await cli.disconnect()
+            except Exception:
+                pass
 
     async def _monitor_connection(self) -> None:
         while True:
