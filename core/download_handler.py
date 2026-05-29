@@ -42,6 +42,17 @@ def _cfg():
     return CFG
 
 
+def compute_priority_key(file_size: int, seq: int, is_priority: bool = False) -> int:
+    if is_priority:
+        return -999999999
+    prio = CFG.download_priority if CFG else "fifo"
+    if prio == "size_asc":
+        return file_size
+    elif prio == "size_desc":
+        return -file_size
+    return seq
+
+
 # ── Helpers ────────────────────────────────────────────────────
 
 

@@ -9,6 +9,7 @@ import webbrowser
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Any
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
@@ -21,7 +22,6 @@ from telethon.sessions import StringSession
 
 from config import AppConfig
 import core.state as cs
-from uploader import upload_worker
 from listener import _do_download
 from core.download_handler import _mtype, _media_name, _resolve_sender_info
 import core.download_handler as dh
@@ -44,23 +44,12 @@ def find_free_port(start_port: int = 8000, max_attempts: int = 100) -> int:
 
 PORT = find_free_port(8000)
 
-app = FastAPI(title="Telegram DL Guard Web Companion")
-
-# CORS Setup
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Global Client and Loop References
 client: TelegramClient | None = None
 background_tasks = set()
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global client
     cfg = AppConfig.load()
     
@@ -71,6 +60,7 @@ async def startup_event():
     
     if not cfg.session_string:
         log.error("Telegram session string not found in .env. Please run Setup Wizard first.")
+        yield
         return
         
     log.info("Starting Telegram client...")
@@ -83,6 +73,7 @@ async def startup_event():
     await client.connect()
     if not await client.is_user_authorized():
         log.error("Telegram session is not authorized.")
+        yield
         return
         
     log.info("Telegram successfully connected!")
@@ -99,7 +90,8 @@ async def startup_event():
             pass
             
     if storage_id:
-        # Spawn upload worker daemon
+        # Spawn upload worker daemon (lazy import)
+        from uploader import upload_worker
         up_mode = os.getenv("UPLOAD_MODE", "realtime_keep")
         up_workers = cfg.upload_workers
         log.info(f"Starting background upload worker (mode={up_mode}, workers={up_workers})...")
@@ -118,12 +110,22 @@ async def startup_event():
     import threading
     threading.Thread(target=open_browser, daemon=True).start()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    global client
+    yield
+
     if client:
         log.info("Disconnecting Telegram client...")
         await client.disconnect()
+
+app = FastAPI(title="Telegram DL Guard Web Companion", lifespan=lifespan)
+
+# CORS Setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- API Endpoints ---
 

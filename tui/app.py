@@ -718,7 +718,7 @@ class GuardApp(App):
             
             mime_stats = await asyncio.to_thread(cs.get_mime_type_stats)
             daily_stats = await asyncio.to_thread(cs.get_daily_stats_last_7_days)
-            ratio_stats = await asyncio.to_thread(cs.get_system_ratio_stats)
+            ratio_stats = await asyncio.to_thread(cs.get_stats)
             
             speed_spark = draw_speed_chart(self._recent_speed_history)
             mime_content = draw_mime_distribution(mime_stats)

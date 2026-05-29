@@ -20,7 +20,7 @@ from config import AppConfig
 from core.download_handler import (
     _ensure_dir, _file_hash_async, _hashes,
     _media_name, _mtype, _resolve_download_path, _rules,
-    _resolve_sender_info,
+    _resolve_sender_info, compute_priority_key,
 )
 from core.rules import evaluate_rules, move_to_folder
 from core.state import (
@@ -179,16 +179,7 @@ async def run_history_scan(
                             if upload_queue is not None:
                                 mark_pending(str(fpath), source_group=group_title, sender_name=sender, caption=original_caption, file_hash=fh)
                                 ACTIVE_UPLOADS.add(str(fpath))
-                                if rule_priority:
-                                    pkey = -999999999
-                                else:
-                                    _prio = cfg.download_priority
-                                    if _prio == "size_asc":
-                                        pkey = sz
-                                    elif _prio == "size_desc":
-                                        pkey = -sz
-                                    else:
-                                        pkey = total_downloaded
+                                pkey = compute_priority_key(sz, total_downloaded, rule_priority)
                                 dt = datetime.fromtimestamp(fpath.stat().st_mtime)
                                 payload = (str(fpath), sender, username, dt, group_title, original_caption, None)
                                 upload_queue.put_nowait((pkey, 900000 + total_downloaded, payload))

@@ -13,6 +13,8 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import re
+from config import AppConfig
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -105,7 +107,6 @@ async def _webhook_dispatcher() -> None:
 
 async def dispatch_webhook_notification(filename: str, file_size: int, sender: str, group: str, caption: str) -> None:
     global _webhook_task
-    from config import AppConfig
     cfg = AppConfig.load()
     if not cfg.webhook_enabled or not cfg.webhook_url:
         return
@@ -113,7 +114,6 @@ async def dispatch_webhook_notification(filename: str, file_size: int, sender: s
     if _webhook_task is None or _webhook_task.done():
         _webhook_task = asyncio.create_task(_webhook_dispatcher())
         
-    from core.utils import format_bytes
     size_str = format_bytes(file_size) if file_size > 0 else "Unknown"
     
     payload = {
@@ -155,8 +155,6 @@ def build_caption(
     Search tag: '#group sender_name' (Telegram search hits this first).
     Detail: one label per line.
     """
-    import re
-
     def _tag(text: str) -> str:
         t = re.sub(r"[^\w\u0E00-\u0E7F\-]", "_", text).strip()
         t = re.sub(r"_+", "_", t)

@@ -19,18 +19,28 @@ load_dotenv()
 _logger = logging.getLogger("guard.config")
 
 
+_yaml_mtime: float = 0.0
+_yaml_cache: dict[str, Any] = {}
+
+
 def _load_yaml() -> dict[str, Any]:
-    """Load YAML once and cache. Returns empty dict on failure."""
+    """Load YAML once and cache, checking file modification time."""
+    global _yaml_mtime, _yaml_cache
     p = Path("config.yaml")
     if not p.exists():
         return {}
     try:
+        mt = p.stat().st_mtime
+        if mt == _yaml_mtime:
+            return _yaml_cache
         with open(p, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-            return data if isinstance(data, dict) else {}
+            data = yaml.safe_load(f) or {}
+        _yaml_mtime = mt
+        _yaml_cache = data if isinstance(data, dict) else {}
+        return _yaml_cache
     except Exception as e:
         _logger.warning("Could not load config.yaml: %s", e)
-        return {}
+        return _yaml_cache
 
 
 _CFG: dict[str, Any] = _load_yaml()

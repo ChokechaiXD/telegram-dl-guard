@@ -100,6 +100,8 @@ _conn = _get_conn()
 def run_auto_migration() -> None:
     """Read legacy JSON state files, migrate them to SQLite, and safely remove the JSONs."""
     global _conn
+    if not (_PROCESSED_IDS_JSON.exists() or _GROUP_CACHE_JSON.exists() or _TRACKER_JSON.exists()):
+        return
     with _db_lock:
         migrated = False
         
@@ -345,38 +347,41 @@ class HashCache:
 
 def is_uploaded(filepath: str) -> bool:
     global _conn
-    try:
-        k = str(Path(filepath).resolve())
-        cursor = _conn.execute("SELECT uploaded FROM download_tracker WHERE filepath = ?", (k,))
-        row = cursor.fetchone()
-        return bool(row and row[0] == 1)
-    except Exception as e:
-        log.error("SQLite is_uploaded check failed: %s", e)
-        return False
+    with _db_lock:
+        try:
+            k = str(Path(filepath).resolve())
+            cursor = _conn.execute("SELECT uploaded FROM download_tracker WHERE filepath = ?", (k,))
+            row = cursor.fetchone()
+            return bool(row and row[0] == 1)
+        except Exception as e:
+            log.error("SQLite is_uploaded check failed: %s", e)
+            return False
 
 
 def is_hash_exists(file_hash: str) -> bool:
     global _conn
     if not file_hash:
         return False
-    try:
-        cursor = _conn.execute("SELECT 1 FROM download_tracker WHERE file_hash = ? LIMIT 1", (file_hash,))
-        return cursor.fetchone() is not None
-    except Exception as e:
-        log.error("SQLite is_hash_exists failed: %s", e)
-        return False
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT 1 FROM download_tracker WHERE file_hash = ? LIMIT 1", (file_hash,))
+            return cursor.fetchone() is not None
+        except Exception as e:
+            log.error("SQLite is_hash_exists failed: %s", e)
+            return False
 
 
 def is_phash_exists(p_hash: str) -> bool:
     global _conn
     if not p_hash:
         return False
-    try:
-        cursor = _conn.execute("SELECT 1 FROM download_tracker WHERE p_hash = ? LIMIT 1", (p_hash,))
-        return cursor.fetchone() is not None
-    except Exception as e:
-        log.error("SQLite is_phash_exists failed: %s", e)
-        return False
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT 1 FROM download_tracker WHERE p_hash = ? LIMIT 1", (p_hash,))
+            return cursor.fetchone() is not None
+        except Exception as e:
+            log.error("SQLite is_phash_exists failed: %s", e)
+            return False
 
 
 def get_phash_match(p_hash: str, max_distance: int = 3) -> str | None:
@@ -386,20 +391,21 @@ def get_phash_match(p_hash: str, max_distance: int = 3) -> str | None:
     global _conn
     if not p_hash:
         return None
-    try:
-        cursor = _conn.execute("SELECT filepath, p_hash FROM download_tracker WHERE p_hash IS NOT NULL")
-        records = cursor.fetchall()
-        for filepath, db_ph in records:
-            try:
-                dist = bin(int(p_hash, 16) ^ int(db_ph, 16)).count("1")
-                if dist <= max_distance:
-                    return filepath
-            except Exception:
-                continue
-        return None
-    except Exception as e:
-        log.error("SQLite get_phash_match failed: %s", e)
-        return None
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT filepath, p_hash FROM download_tracker WHERE p_hash IS NOT NULL")
+            records = cursor.fetchall()
+            for filepath, db_ph in records:
+                try:
+                    dist = bin(int(p_hash, 16) ^ int(db_ph, 16)).count("1")
+                    if dist <= max_distance:
+                        return filepath
+                except Exception:
+                    continue
+            return None
+        except Exception as e:
+            log.error("SQLite get_phash_match failed: %s", e)
+            return None
 
 
 def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = None, p_hash: str | None = None) -> None:
@@ -444,53 +450,56 @@ def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str 
 
 def get_pending() -> list[str]:
     global _conn
-    try:
-        cursor = _conn.execute("SELECT filepath FROM download_tracker WHERE uploaded = 0")
-        return [row[0] for row in cursor.fetchall()]
-    except Exception as e:
-        log.error("SQLite get_pending failed: %s", e)
-        return []
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT filepath FROM download_tracker WHERE uploaded = 0")
+            return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            log.error("SQLite get_pending failed: %s", e)
+            return []
 
 
 def get_pending_details() -> list[dict]:
     global _conn
-    try:
-        cursor = _conn.execute("SELECT filepath, sender_name, source_group, original_caption, size, file_hash FROM download_tracker WHERE uploaded = 0")
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "filepath": row[0],
-                "sender_name": row[1] or "unknown",
-                "source_group": row[2] or "unknown",
-                "original_caption": row[3] or "",
-                "size": row[4] or 0,
-                "file_hash": row[5]
-            })
-        return results
-    except Exception as e:
-        log.error("SQLite get_pending_details failed: %s", e)
-        return []
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT filepath, sender_name, source_group, original_caption, size, file_hash FROM download_tracker WHERE uploaded = 0")
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "filepath": row[0],
+                    "sender_name": row[1] or "unknown",
+                    "source_group": row[2] or "unknown",
+                    "original_caption": row[3] or "",
+                    "size": row[4] or 0,
+                    "file_hash": row[5]
+                })
+            return results
+        except Exception as e:
+            log.error("SQLite get_pending_details failed: %s", e)
+            return []
 
 
 
 def get_uploaded() -> list[dict]:
     global _conn
-    try:
-        cursor = _conn.execute("SELECT filepath, filename, size, storage_msg_id, uploaded_at, file_hash FROM download_tracker WHERE uploaded = 1")
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "filepath": row[0],
-                "filename": row[1],
-                "size": row[2],
-                "storage_msg_id": row[3],
-                "uploaded_at": row[4],
-                "file_hash": row[5] or ""
-            })
-        return results
-    except Exception as e:
-        log.error("SQLite get_uploaded failed: %s", e)
-        return []
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT filepath, filename, size, storage_msg_id, uploaded_at, file_hash FROM download_tracker WHERE uploaded = 1")
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "filepath": row[0],
+                    "filename": row[1],
+                    "size": row[2],
+                    "storage_msg_id": row[3],
+                    "uploaded_at": row[4],
+                    "file_hash": row[5] or ""
+                })
+            return results
+        except Exception as e:
+            log.error("SQLite get_uploaded failed: %s", e)
+            return []
 
 
 def remove_entry(filepath: str) -> None:
@@ -578,46 +587,48 @@ def scan_downloads(download_dir: str = "downloads") -> list[dict]:
 
 def get_all() -> list[dict]:
     global _conn
-    try:
-        cursor = _conn.execute("SELECT filepath, filename, size, uploaded, uploaded_at, storage_msg_id, file_hash FROM download_tracker")
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "filepath": row[0],
-                "filename": row[1],
-                "size": row[2],
-                "uploaded": bool(row[3] == 1),
-                "date": row[4] or "",
-                "storage_msg_id": row[5],
-                "file_hash": row[6] or ""
-            })
-        return results
-    except Exception as e:
-        log.error("SQLite get_all failed: %s", e)
-        return []
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT filepath, filename, size, uploaded, uploaded_at, storage_msg_id, file_hash FROM download_tracker")
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "filepath": row[0],
+                    "filename": row[1],
+                    "size": row[2],
+                    "uploaded": bool(row[3] == 1),
+                    "date": row[4] or "",
+                    "storage_msg_id": row[5],
+                    "file_hash": row[6] or ""
+                })
+            return results
+        except Exception as e:
+            log.error("SQLite get_all failed: %s", e)
+            return []
 
 
 def get_stats() -> dict:
     global _conn
-    try:
-        cursor = _conn.execute("""
-            SELECT 
-                COUNT(*),
-                SUM(CASE WHEN uploaded = 1 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN uploaded = 0 THEN 1 ELSE 0 END),
-                COALESCE(SUM(size), 0)
-            FROM download_tracker
-        """)
-        row = cursor.fetchone()
-        total = row[0] or 0
-        uploaded = row[1] or 0
-        pending = row[2] or 0
-        total_size = row[3] or 0
-                
-        return {"total": total, "uploaded": uploaded, "pending": pending, "total_size": total_size}
-    except Exception as e:
-        log.error("SQLite get_stats failed: %s", e)
-        return {"total": 0, "uploaded": 0, "pending": 0, "total_size": 0}
+    with _db_lock:
+        try:
+            cursor = _conn.execute("""
+                SELECT 
+                    COUNT(*),
+                    SUM(CASE WHEN uploaded = 1 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN uploaded = 0 THEN 1 ELSE 0 END),
+                    COALESCE(SUM(size), 0)
+                FROM download_tracker
+            """)
+            row = cursor.fetchone()
+            total = row[0] or 0
+            uploaded = row[1] or 0
+            pending = row[2] or 0
+            total_size = row[3] or 0
+                    
+            return {"total": total, "uploaded": uploaded, "pending": pending, "total_size": total_size}
+        except Exception as e:
+            log.error("SQLite get_stats failed: %s", e)
+            return {"total": 0, "uploaded": 0, "pending": 0, "total_size": 0}
 
 
 def purge_old_records(msg_days: int = 7, tracker_days: int = 30) -> dict:
@@ -722,25 +733,3 @@ def get_daily_stats_last_7_days() -> list[tuple[str, int, int]]:
         results.append((d, stats[d]["count"], stats[d]["bytes"]))
     return results
 
-
-def get_system_ratio_stats() -> dict[str, int]:
-    """Return total ratio analysis stats of downloaded vs uploaded items."""
-    global _conn
-    stats = {"total": 0, "uploaded": 0, "pending": 0}
-    with _db_lock:
-        try:
-            cursor = _conn.execute("""
-                SELECT 
-                    COUNT(*),
-                    SUM(CASE WHEN uploaded = 1 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN uploaded = 0 THEN 1 ELSE 0 END)
-                FROM download_tracker
-            """)
-            row = cursor.fetchone()
-            if row:
-                stats["total"] = row[0] or 0
-                stats["uploaded"] = row[1] or 0
-                stats["pending"] = row[2] or 0
-        except Exception as e:
-            log.error("Failed to query ratio stats: %s", e)
-    return stats

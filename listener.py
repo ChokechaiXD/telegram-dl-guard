@@ -12,6 +12,7 @@ import os
 import signal as _signal
 import sys
 import time
+import zipfile
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,7 @@ from core.download_handler import (
     _cfg, _extract_peer_id, _file_hash, _file_hash_async, _dhash_async,
     _fmt_speed, _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
-    _resolve_sender_info, _mtype, _ensure_dir,
+    _resolve_sender_info, _mtype, _ensure_dir, compute_priority_key,
 )
 from core.state import (
     load_state, GLOBAL_STATUS, ACTIVE_DOWNLOADS, ACTIVE_TASKS,
@@ -248,17 +249,7 @@ async def _do_download(
                         if upload_queue is not None:
                             mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh, p_hash=ph)
                             ACTIVE_UPLOADS.add(str(fpath))
-                            # Priority key: size_asc=small first, size_desc=large first, fifo=order
-                            if priority:
-                                pkey = -999999999
-                            else:
-                                _prio = dh.CFG.download_priority if dh.CFG else "fifo"
-                                if _prio == "size_asc":
-                                    pkey = sz
-                                elif _prio == "size_desc":
-                                    pkey = -sz
-                                else:
-                                    pkey = GLOBAL_STATUS.get("processed", 0)
+                            pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), priority)
                             payload = (str(fpath), sender, username, msg.date,
                                        group_name, original_caption, album_group)
                             upload_queue.put_nowait((pkey, msg.id, payload))
@@ -449,7 +440,19 @@ async def run(provided_client: TelegramClient | None = None) -> None:
 
     # ── Event handlers ─────────────────────────────────────────
 
-    # ── Event handlers ─────────────────────────────────────────
+    async def _enqueue_album_items_individually(
+        download_targets: list, group_name: str, sender: str, username: str | None,
+        grouped_id: int, upload_queue
+    ) -> None:
+        for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
+            if fpath.exists() and fpath.stat().st_size > 0:
+                sz = fpath.stat().st_size
+                fh = await _file_hash_async(fpath)
+                mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
+                ACTIVE_UPLOADS.add(str(fpath))
+                pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), rule_priority)
+                payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
+                await upload_queue.put((pkey, msg.id, payload))
 
     async def _flush_album_after_delay(grouped_id: int, delay: float) -> None:
         try:
@@ -485,7 +488,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
 
         sender, username, group_name, _, _ = r
         original_caption = (getattr(first_msg, "message", None) or "").strip()
-        ddir = Path(dh.CFG.download_dir) / _sanitize_group(group_name) / sender
+        ddir = Path(dh.CFG.download_dir) / sanitize_group(group_name) / sender
         _ensure_dir(ddir)
 
         # Collect download tasks for all messages in the album
@@ -563,8 +566,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                 
                 if len(downloaded_files) >= zip_threshold:
                     # Perform zipping!
-                    import zipfile
-                    zip_name = f"{first_msg.date:%Y%m%d_%H%M%S}_{_sanitize_group(group_name)}_Album_{grouped_id}.zip"
+                    zip_name = f"{first_msg.date:%Y%m%d_%H%M%S}_{sanitize_group(group_name)}_Album_{grouped_id}.zip"
                     zip_path = ddir / zip_name
                     
                     log.info(f"Auto-Zip: Compressing {len(downloaded_files)} files into archive: {zip_name}")
@@ -593,61 +595,17 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                         # Priority and Enqueue
                         # If any part had priority, ZIP has priority
                         priority_zip = any(t[4] for t in download_targets)
-                        if priority_zip:
-                            pkey = -999999999
-                        else:
-                            _prio = dh.CFG.download_priority if dh.CFG else "fifo"
-                            if _prio == "size_asc":
-                                pkey = sz
-                            elif _prio == "size_desc":
-                                pkey = -sz
-                            else:
-                                pkey = GLOBAL_STATUS.get("processed", 0)
-                                
+                        pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), priority_zip)
                         payload = (str(zip_path), sender, username, first_msg.date, group_name, zip_caption, None)
-                        await upload_queue.put((pkey, payload))
+                        await upload_queue.put((pkey, first_msg.id, payload))
                         log.info(f"Auto-Zip complete: Enqueued archive {zip_name}")
                     except Exception as ze:
                         log.error(f"Auto-Zip failed: {ze}. Falling back to individual queueing.")
                         # Fallback: Enqueue individually
-                        for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
-                            if fpath.exists() and fpath.stat().st_size > 0:
-                                sz = fpath.stat().st_size
-                                fh = await _file_hash_async(fpath)
-                                mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
-                                ACTIVE_UPLOADS.add(str(fpath))
-                                if rule_priority:
-                                    pkey = -999999999
-                                else:
-                                    _prio = dh.CFG.download_priority if dh.CFG else "fifo"
-                                    if _prio == "size_asc":
-                                        pkey = sz
-                                    elif _prio == "size_desc":
-                                        pkey = -sz
-                                    else:
-                                        pkey = GLOBAL_STATUS.get("processed", 0)
-                                payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
-                                await upload_queue.put((pkey, payload))
+                        await _enqueue_album_items_individually(download_targets, group_name, sender, username, grouped_id, upload_queue)
                 else:
                     # Did not meet threshold: Register and Enqueue individually
-                    for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
-                        if fpath.exists() and fpath.stat().st_size > 0:
-                            sz = fpath.stat().st_size
-                            fh = await _file_hash_async(fpath)
-                            mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
-                            ACTIVE_UPLOADS.add(str(fpath))
-                            if rule_priority:
-                                pkey = -999999999
-                            else:
-                                _prio = dh.CFG.download_priority if dh.CFG else "fifo"
-                                if _prio == "size_asc":
-                                    pkey = sz
-                                elif _prio == "size_desc":
-                                    pkey = -sz
-                                else:
-                                    pkey = GLOBAL_STATUS.get("processed", 0)
-                            payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
-                            await upload_queue.put((pkey, payload))
+                    await _enqueue_album_items_individually(download_targets, group_name, sender, username, grouped_id, upload_queue)
 
     @client.on(events.NewMessage)
     async def _on_msg(event) -> None:
@@ -805,10 +763,3 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             _persist()
             GLOBAL_STATUS["running"] = False
             log.info("Stopped. Total processed: %d", GLOBAL_STATUS["processed"])
-
-
-def _sanitize_group(name: str) -> str:
-    try:
-        return sanitize_group(name)
-    except Exception:
-        return "".join(c if c.isalnum() or c in "_- " else "_" for c in name)[:50]
