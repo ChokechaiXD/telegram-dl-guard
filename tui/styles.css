@@ -180,3 +180,25 @@ Screen {
     width: 14;
     margin-left: 2;
 }
+
+.raw-text-area {
+    height: 18;
+    background: #07090e;
+    color: #c9d1d9;
+    border: solid #1f2937;
+    margin-top: 1;
+    margin-bottom: 1;
+    font-family: monospace;
+}
+
+.settings-raw-actions {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+.settings-raw-actions Button {
+    margin: 0 1;
+    width: 20;
+}

@@ -11,7 +11,7 @@ from typing import Any
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Header, Footer, Static, Button, RichLog, Input, Select, Switch, DirectoryTree
+from textual.widgets import Header, Footer, Static, Button, RichLog, Input, Select, Switch, DirectoryTree, TextArea
 from textual.binding import Binding
 
 from config import AppConfig
@@ -860,6 +860,10 @@ class GuardApp(App):
             self.reset_to_defaults()
         elif btn_id == "btn-sync-groups":
             asyncio.create_task(self.sync_telegram_groups())
+        elif btn_id == "btn-load-raw-file":
+            self.load_raw_file_to_ui()
+        elif btn_id == "btn-save-raw-file":
+            self.save_raw_file_from_ui()
 
     def action_cmd_start(self) -> None:
         GLOBAL_STATUS["paused"] = False
@@ -878,3 +882,50 @@ class GuardApp(App):
 
     async def action_cmd_gallery(self) -> None:
         await self.toggle_gallery()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "setting-raw-file-select":
+            self.load_raw_file_to_ui()
+
+    def load_raw_file_to_ui(self) -> None:
+        try:
+            select_val = self.query_one("#setting-raw-file-select", Select).value
+            file_name = str(select_val).strip() if (select_val and str(select_val) != "Select.BLANK" and select_val != getattr(Select, "BLANK", None)) else ""
+            if not file_name or file_name == "None":
+                return
+            
+            p = Path(file_name)
+            if not p.exists():
+                self.query_one("#setting-raw-text-area", TextArea).text = ""
+                self.notify(f"File {file_name} does not exist yet.", severity="warning", title="Raw Editor")
+                return
+            
+            with open(p, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            self.query_one("#setting-raw-text-area", TextArea).text = content
+            self.notify(f"Loaded {file_name} successfully!", title="Raw Editor")
+        except Exception as e:
+            self.notify(f"Failed to load file: {e}", severity="error", title="Raw Editor")
+
+    def save_raw_file_from_ui(self) -> None:
+        try:
+            select_val = self.query_one("#setting-raw-file-select", Select).value
+            file_name = str(select_val).strip() if (select_val and str(select_val) != "Select.BLANK" and select_val != getattr(Select, "BLANK", None)) else ""
+            if not file_name or file_name == "None":
+                self.notify("Please select a file to save.", severity="warning", title="Raw Editor")
+                return
+            
+            content = self.query_one("#setting-raw-text-area", TextArea).text
+            
+            p = Path(file_name)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+                
+            self.notify(f"Saved {file_name} successfully! Restarting engine...", title="Raw Editor")
+            
+            # If the edited file is .env or config.yaml, restart the engine
+            if file_name in (".env", "config.yaml"):
+                asyncio.create_task(self.restart_listener_engine())
+        except Exception as e:
+            self.notify(f"Failed to save file: {e}", severity="error", title="Raw Editor")

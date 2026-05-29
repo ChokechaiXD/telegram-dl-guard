@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Label, Button, Input, Select, Switch
+from textual.widgets import Label, Button, Input, Select, Switch, TextArea
 
 class SettingsContainer(VerticalScroll):
     """Container holding all the dynamic forms for system configuration."""
@@ -267,6 +267,27 @@ class SettingsContainer(VerticalScroll):
             with Horizontal(classes="setting-row"):
                 yield Label("Webhook URL:")
                 yield Input(placeholder="Paste Discord/Telegram Webhook URL here", id="setting-webhook-url")
+        
+        # GROUP 8: Advanced Raw Config Editors
+        with Vertical(classes="settings-group"):
+            yield Label("Advanced Config Files (Raw Direct Edit)", classes="card-title")
+            with Horizontal(classes="setting-row"):
+                yield Label("Select File to Edit:")
+                yield Select(
+                    options=[
+                        (".env (Secrets & Overrides)", ".env"),
+                        ("config.yaml (Non-secrets)", "config.yaml"),
+                        ("rules.yaml (Rule Engine Definitions)", "rules.yaml")
+                    ],
+                    id="setting-raw-file-select",
+                    prompt="Choose file to edit"
+                )
+            
+            yield TextArea(show_line_numbers=True, id="setting-raw-text-area", classes="raw-text-area")
+            
+            with Horizontal(classes="settings-raw-actions"):
+                yield Button("Load Content", variant="default", id="btn-load-raw-file")
+                yield Button("Save Raw File", variant="error", id="btn-save-raw-file")
         
         # Action Buttons
         with Horizontal(classes="settings-actions"):
