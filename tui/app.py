@@ -77,7 +77,9 @@ class GuardApp(App):
         self._refresh_dashboard()
         self.set_interval(2, self._refresh_dashboard)
 
-        # Start background listener task in the same Event Loop
+        # Background thread properties
+        self._listener_thread = None
+        self._background_loop = None
         self.listener_task: asyncio.Task | None = None
         self.client: Any | None = None
         self._is_online = False
@@ -86,15 +88,39 @@ class GuardApp(App):
     async def _monitor_connection(self) -> None:
         while True:
             try:
-                if self.client:
-                    self._is_online = await self.client.is_connected()
+                if self.client and self._background_loop and self._background_loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(self.client.is_connected(), self._background_loop)
+                    self._is_online = await asyncio.wrap_future(future)
                 else:
                     self._is_online = False
             except Exception:
                 self._is_online = False
             await asyncio.sleep(5)
 
-    async def start_listener_engine(self) -> None:
+    def start_listener_engine(self) -> None:
+        import threading
+        if self._listener_thread and self._listener_thread.is_alive():
+            return
+            
+        self._is_online = False
+        
+        def run_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._background_loop = loop
+            try:
+                loop.run_until_complete(self.start_listener_engine_async())
+            except Exception as ex:
+                logging.getLogger("guard").error(f"Background thread loop crashed: {ex}")
+            finally:
+                loop.close()
+                self._background_loop = None
+                self._is_online = False
+                
+        self._listener_thread = threading.Thread(target=run_in_thread, name="TelegramDLGuardEngine", daemon=True)
+        self._listener_thread.start()
+
+    async def start_listener_engine_async(self) -> None:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
         from listener import run as run_listener
@@ -140,29 +166,24 @@ class GuardApp(App):
 
     async def restart_listener_engine(self) -> None:
         logging.getLogger("guard").info("Restarting Telegram DL Guard Engine...")
-        if self.listener_task:
-            self.listener_task.cancel()
-            try:
-                await self.listener_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as ex:
-                logging.getLogger("guard").warning(f"Error while canceling listener task: {ex}")
-            self.listener_task = None
-
         if self.client:
             try:
-                await self.client.disconnect()
-            except Exception:
-                pass
+                if self._background_loop and self._background_loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(self.client.disconnect(), self._background_loop)
+                    await asyncio.wrap_future(future)
+            except Exception as ex:
+                logging.getLogger("guard").warning(f"Error while disconnecting: {ex}")
             self.client = None
             
+        self.listener_task = None
+        self._background_loop = None
+        
         await asyncio.sleep(1.0)
-        asyncio.create_task(self.start_listener_engine())
+        self.start_listener_engine()
 
     async def sync_telegram_groups(self) -> None:
         """Fetch all groups/channels Asynchronously, save names to cache and print to Log Panel."""
-        if not self.client or not await self.client.is_connected():
+        if not self.client or not self._background_loop or not self._background_loop.is_running():
             self.notify("Telegram client not connected or logged in.", severity="error", title="Sync Failed")
             return
             
@@ -170,8 +191,9 @@ class GuardApp(App):
         logging.getLogger("guard").info("🔍 Fetching target groups from Telegram dialogs Asynchronously...")
         
         try:
-            # Fetch all dialogues
-            dialogs = await self.client.get_dialogs()
+            # Fetch all dialogues thread-safely
+            future = asyncio.run_coroutine_threadsafe(self.client.get_dialogs(), self._background_loop)
+            dialogs = await asyncio.wrap_future(future)
             groups = [d for d in dialogs if d.is_group or d.is_channel]
             
             if not groups:
@@ -201,7 +223,7 @@ class GuardApp(App):
         try:
             ts = datetime.now().strftime("%H:%M:%S")
             style = self._LOG_STYLES.get(level, "green")
-            self._log_panel.write(Text(f"[{ts}] {msg}", style=style))
+            self.call_from_thread(self._log_panel.write, Text(f"[{ts}] {msg}", style=style))
         except Exception:
             pass
 
@@ -844,7 +866,7 @@ class GuardApp(App):
         if btn_id == "btn-start":
             if not self.listener_task:
                 self.notify("Starting Telegram DL Guard Listener Engine...", title="Status Update")
-                asyncio.create_task(self.start_listener_engine())
+                self.start_listener_engine()
             else:
                 GLOBAL_STATUS["paused"] = False
                 self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
@@ -872,7 +894,7 @@ class GuardApp(App):
     def action_cmd_start(self) -> None:
         if not self.listener_task:
             self.notify("Starting Telegram DL Guard Listener Engine...", title="Status Update")
-            asyncio.create_task(self.start_listener_engine())
+            self.start_listener_engine()
         else:
             GLOBAL_STATUS["paused"] = False
             self.notify("Resumed Telegram DL Guard Listener.", title="Status Update")
