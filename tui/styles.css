@@ -306,7 +306,7 @@ Input:focus, Select:focus, TextArea:focus {
 #setting-target-groups-container {
     background: #090b0f;
     border: solid #1f2937;
-    height: 10;
+    height: 18;
     width: 1fr;
     padding: 1;
     overflow-y: scroll;
@@ -352,4 +352,11 @@ Input:focus, Select:focus, TextArea:focus {
     width: 6;
     min-width: 6;
     padding: 0;
+}
+
+SelectOverlay {
+    height: auto;
+    max-height: 22;
+    background: #090b0f;
+    border: solid #1f2937;
 }

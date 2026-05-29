@@ -245,8 +245,8 @@ class GuardApp(App):
 
     async def sync_telegram_groups(self) -> None:
         """Fetch all groups/channels Asynchronously, save names to cache and print to Log Panel."""
-        if not self.client or not self._background_loop or not self._background_loop.is_running():
-            self.notify("Telegram client not connected or logged in.", severity="error", title="Sync Failed")
+        if not await self.ensure_client_connected():
+            self.notify("Telegram client not connected or logged in. Please click 'Start' on Dashboard or login first.", severity="error", title="Sync Failed")
             return
             
         self.notify("Fetching dialogs from Telegram... (Please check Log Panel)", title="Syncing Groups")
