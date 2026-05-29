@@ -441,6 +441,20 @@ Pillow>=12.0.0
 
 ---
 
+## 💖 Support & Tip Me
+
+If this project has saved you time, disk space, or made your media archiving smoother, consider buying the developer a coffee or tipping! Your support helps keep this tool free, secure, and actively updated.
+
+> [!TIP]
+> - **☕ Buy Me a Coffee**: [buymeacoffee.com/YOUR_USERNAME](https://www.buymeacoffee.com/YOUR_USERNAME)
+> - **📱 PromptPay (Thailand)**: *[Double-click README.md to edit and insert your PromptPay Phone/ID or QR Code here]*
+> - **🪙 Cryptocurrencies**:
+>   - **USDT (TRC-20)**: `YOUR_USDT_TRC20_ADDRESS`
+>   - **BTC**: `YOUR_BTC_ADDRESS`
+>   - **ETH (ERC-20)**: `YOUR_ETH_ERC20_ADDRESS`
+
+---
+
 ## 📄 License
 
 This project is licensed under the Non-Commercial Personal Use License — see the [LICENSE](LICENSE) file for details. Any commercial use, monetization, or selling of this application is strictly prohibited.
