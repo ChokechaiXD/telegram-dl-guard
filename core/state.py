@@ -66,7 +66,8 @@ def _get_conn() -> sqlite3.Connection:
                 source_group TEXT,
                 sender_name TEXT,
                 original_caption TEXT,
-                file_hash TEXT
+                file_hash TEXT,
+                p_hash TEXT
             )
         """)
 
@@ -76,8 +77,15 @@ def _get_conn() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass
 
+        # Migration: Add p_hash if it doesn't exist
+        try:
+            conn.execute("ALTER TABLE download_tracker ADD COLUMN p_hash TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # Indexes for fast lookups
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracker_hash ON download_tracker (file_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracker_phash ON download_tracker (p_hash)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracker_uploaded ON download_tracker (uploaded)")
 
     return conn
@@ -356,7 +364,42 @@ def is_hash_exists(file_hash: str) -> bool:
         return False
 
 
-def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = None) -> None:
+def is_phash_exists(p_hash: str) -> bool:
+    global _conn
+    if not p_hash:
+        return False
+    try:
+        cursor = _conn.execute("SELECT 1 FROM download_tracker WHERE p_hash = ? LIMIT 1", (p_hash,))
+        return cursor.fetchone() is not None
+    except Exception as e:
+        log.error("SQLite is_phash_exists failed: %s", e)
+        return False
+
+
+def get_phash_match(p_hash: str, max_distance: int = 3) -> str | None:
+    """Find a similar photo in the database based on Hamming distance.
+    Returns the filepath of the matched record if found, else None.
+    """
+    global _conn
+    if not p_hash:
+        return None
+    try:
+        cursor = _conn.execute("SELECT filepath, p_hash FROM download_tracker WHERE p_hash IS NOT NULL")
+        records = cursor.fetchall()
+        for filepath, db_ph in records:
+            try:
+                dist = bin(int(p_hash, 16) ^ int(db_ph, 16)).count("1")
+                if dist <= max_distance:
+                    return filepath
+            except Exception:
+                continue
+        return None
+    except Exception as e:
+        log.error("SQLite get_phash_match failed: %s", e)
+        return None
+
+
+def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = None, p_hash: str | None = None) -> None:
     global _conn
     with _db_lock:
         try:
@@ -369,15 +412,15 @@ def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = No
             with _conn:
                 _conn.execute("""
                     INSERT OR REPLACE INTO download_tracker 
-                    (filepath, filename, size, uploaded, storage_msg_id, uploaded_at, file_hash)
-                    VALUES (?, ?, ?, 1, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)))
-                """, (k, filename, size, storage_msg_id, now_str, file_hash, k))
+                    (filepath, filename, size, uploaded, storage_msg_id, uploaded_at, file_hash, p_hash)
+                    VALUES (?, ?, ?, 1, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)), COALESCE(?, (SELECT p_hash FROM download_tracker WHERE filepath = ?)))
+                """, (k, filename, size, storage_msg_id, now_str, file_hash, k, p_hash, k))
             log.info(f"upload_tracker SQLite: marked uploaded: {filename}")
         except Exception as e:
             log.error("SQLite mark_uploaded failed: %s", e)
 
 
-def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str = "unknown", caption: str = "", file_hash: str | None = None) -> None:
+def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str = "unknown", caption: str = "", file_hash: str | None = None, p_hash: str | None = None) -> None:
     global _conn
     with _db_lock:
         try:
@@ -389,9 +432,9 @@ def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str 
             with _conn:
                 _conn.execute("""
                     INSERT OR REPLACE INTO download_tracker 
-                    (filepath, filename, size, uploaded, source_group, sender_name, original_caption, file_hash)
-                    VALUES (?, ?, ?, 0, ?, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)))
-                """, (k, filename, size, source_group, sender_name, caption, file_hash, k))
+                    (filepath, filename, size, uploaded, source_group, sender_name, original_caption, file_hash, p_hash)
+                    VALUES (?, ?, ?, 0, ?, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)), COALESCE(?, (SELECT p_hash FROM download_tracker WHERE filepath = ?)))
+                """, (k, filename, size, source_group, sender_name, caption, file_hash, k, p_hash, k))
         except Exception as e:
             log.error("SQLite mark_pending failed: %s", e)
 

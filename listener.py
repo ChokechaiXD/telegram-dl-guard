@@ -25,7 +25,7 @@ from config import AppConfig
 from core.cleanup import _cleanup_task, _aggressive_uploaded_cleanup_task
 import core.download_handler as dh
 from core.download_handler import (
-    _cfg, _extract_peer_id, _file_hash, _file_hash_async,
+    _cfg, _extract_peer_id, _file_hash, _file_hash_async, _dhash_async,
     _fmt_speed, _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir,
@@ -33,7 +33,7 @@ from core.download_handler import (
 from core.state import (
     load_state, GLOBAL_STATUS, ACTIVE_DOWNLOADS, ACTIVE_TASKS,
     ACTIVE_UPLOADS, get_pending_details, remove_entry, persist_state,
-    mark_pending
+    mark_pending, is_hash_exists, is_phash_exists, get_phash_match
 )
 from core.rules import load_rules, compile_rules, evaluate_rules
 from core.utils import sanitize_group
@@ -212,10 +212,30 @@ async def _do_download(
                         speed = sz / elapsed if elapsed > 0 else 0
 
                         fh = None
+                        ph = None
                         if dedup_method == "hash":
                             fh = await _file_hash_async(fpath)
                             if fh:
+                                if is_hash_exists(fh):
+                                    log.info(f"Duplicate detected via database hash: {fpath.name}. Deleting local copy and skipping.")
+                                    try:
+                                        fpath.unlink()
+                                    except Exception:
+                                        pass
+                                    return True
                                 _hashes.put(fh, str(fpath))
+
+                        if mt == "photo":
+                            ph = await _dhash_async(fpath)
+                            if ph:
+                                match_path = get_phash_match(ph, max_distance=3)
+                                if match_path or is_phash_exists(ph):
+                                    log.info(f"Duplicate photo detected via perceptual hash (dHash): {fpath.name}. Match: {match_path}. Deleting local copy and skipping.")
+                                    try:
+                                        fpath.unlink()
+                                    except Exception:
+                                        pass
+                                    return True
 
                         ss = f" ({_fmt_speed(speed)})" if show_speed and speed > 0 else ""
                         log_msg = f"[{mt}] {sender}/{fpath.name} ({sz / 1_048_576:.1f}MB{ss})"
@@ -224,7 +244,7 @@ async def _do_download(
                         log.info(log_msg)
 
                         if upload_queue is not None:
-                            mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
+                            mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh, p_hash=ph)
                             ACTIVE_UPLOADS.add(str(fpath))
                             # Priority key: size_asc=small first, size_desc=large first, fifo=order
                             if priority:
@@ -466,6 +486,14 @@ async def run(provided_client: TelegramClient | None = None) -> None:
 
         # Collect download tasks for all messages in the album
         tasks = []
+        download_targets = []  # List of tuples: (msg, fpath, mt, original_caption, rule_priority, fsize)
+        
+        auto_zip_enabled = os.getenv("AUTO_ZIP", "false").lower() in ("true", "1")
+        zip_threshold = int(os.getenv("ZIP_THRESHOLD", "5"))
+        
+        # Decide if we defer queue registration for zipping
+        defer_queue = (upload_queue is not None) and auto_zip_enabled
+
         for msg in msgs:
             if msg.id in processed:
                 continue
@@ -501,20 +529,121 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             if fpath is None:
                 continue
 
+            download_targets.append((msg, fpath, mt, original_caption, rule_priority, fsize))
+            
+            # Pass None for upload_queue if deferring
+            active_q = None if defer_queue else upload_queue
+            
             tasks.append(
                 _do_download(
                     client, msg, fpath, fpath.parent, mt, sender, username,
                     group_name, original_caption, grouped_id, fsize,
-                    upload_queue, dh.CFG.dedup_method, dh.CFG.show_speed,
+                    active_q, dh.CFG.dedup_method, dh.CFG.show_speed,
                     priority=rule_priority,
                 )
             )
 
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for ok in results:
+            for idx, ok in enumerate(results):
                 if isinstance(ok, Exception):
                     log.error("Album error: %s", ok)
+            
+            # Process zipping or deferred queue enqueuing
+            if defer_queue:
+                # Find all successfully downloaded files
+                downloaded_files = []
+                for _, fpath, _, _, _, _ in download_targets:
+                    if fpath.exists() and fpath.stat().st_size > 0:
+                        downloaded_files.append(fpath)
+                
+                if len(downloaded_files) >= zip_threshold:
+                    # Perform zipping!
+                    import zipfile
+                    zip_name = f"{first_msg.date:%Y%m%d_%H%M%S}_{_sanitize_group(group_name)}_Album_{grouped_id}.zip"
+                    zip_path = ddir / zip_name
+                    
+                    log.info(f"Auto-Zip: Compressing {len(downloaded_files)} files into archive: {zip_name}")
+                    try:
+                        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                            for f in downloaded_files:
+                                zipf.write(f, arcname=f.name)
+                                
+                        # Delete original sub-files
+                        for f in downloaded_files:
+                            try:
+                                f.unlink()
+                            except Exception:
+                                pass
+                        
+                        # Register the single ZIP file
+                        sz = zip_path.stat().st_size
+                        zip_hash = await _file_hash_async(zip_path)
+                        
+                        # Custom caption detailing contents
+                        zip_caption = f"{original_caption} (Compressed Album Archive containing {len(downloaded_files)} items)"
+                        
+                        mark_pending(str(zip_path), source_group=group_name, sender_name=sender, caption=zip_caption, file_hash=zip_hash)
+                        ACTIVE_UPLOADS.add(str(zip_path))
+                        
+                        # Priority and Enqueue
+                        # If any part had priority, ZIP has priority
+                        priority_zip = any(t[4] for t in download_targets)
+                        if priority_zip:
+                            pkey = -999999999
+                        else:
+                            _prio = dh.CFG.download_priority if dh.CFG else "fifo"
+                            if _prio == "size_asc":
+                                pkey = sz
+                            elif _prio == "size_desc":
+                                pkey = -sz
+                            else:
+                                pkey = GLOBAL_STATUS.get("processed", 0)
+                                
+                        payload = (str(zip_path), sender, username, first_msg.date, group_name, zip_caption, None)
+                        await upload_queue.put((pkey, payload))
+                        log.info(f"Auto-Zip complete: Enqueued archive {zip_name}")
+                    except Exception as ze:
+                        log.error(f"Auto-Zip failed: {ze}. Falling back to individual queueing.")
+                        # Fallback: Enqueue individually
+                        for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
+                            if fpath.exists() and fpath.stat().st_size > 0:
+                                sz = fpath.stat().st_size
+                                fh = await _file_hash_async(fpath)
+                                mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
+                                ACTIVE_UPLOADS.add(str(fpath))
+                                if rule_priority:
+                                    pkey = -999999999
+                                else:
+                                    _prio = dh.CFG.download_priority if dh.CFG else "fifo"
+                                    if _prio == "size_asc":
+                                        pkey = sz
+                                    elif _prio == "size_desc":
+                                        pkey = -sz
+                                    else:
+                                        pkey = GLOBAL_STATUS.get("processed", 0)
+                                payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
+                                await upload_queue.put((pkey, payload))
+                else:
+                    # Did not meet threshold: Register and Enqueue individually
+                    for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
+                        if fpath.exists() and fpath.stat().st_size > 0:
+                            sz = fpath.stat().st_size
+                            fh = await _file_hash_async(fpath)
+                            mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
+                            ACTIVE_UPLOADS.add(str(fpath))
+                            if rule_priority:
+                                pkey = -999999999
+                            else:
+                                _prio = dh.CFG.download_priority if dh.CFG else "fifo"
+                                if _prio == "size_asc":
+                                    pkey = sz
+                                elif _prio == "size_desc":
+                                    pkey = -sz
+                                else:
+                                    pkey = GLOBAL_STATUS.get("processed", 0)
+                            payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
+                            await upload_queue.put((pkey, payload))
 
     @client.on(events.NewMessage)
     async def _on_msg(event) -> None:

@@ -72,6 +72,32 @@ async def _file_hash_async(path: Path) -> str | None:
     return await asyncio.to_thread(_file_hash, path)
 
 
+def _dhash(path: Path) -> str | None:
+    """Compute 64-bit Difference Hash (dHash) of an image using Pillow."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            img = img.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+            pixels = list(img.getdata())
+            diff = []
+            for row in range(8):
+                for col in range(8):
+                    left = pixels[row * 9 + col]
+                    right = pixels[row * 9 + col + 1]
+                    diff.append(left > right)
+            val = 0
+            for bit in diff:
+                val = (val << 1) | bit
+            return f"{val:016x}"
+    except Exception:
+        return None
+
+
+async def _dhash_async(path: Path) -> str | None:
+    """Non-blocking Difference Hash computation via thread pool."""
+    return await asyncio.to_thread(_dhash, path)
+
+
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
