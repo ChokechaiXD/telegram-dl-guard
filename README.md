@@ -450,10 +450,6 @@ If this project has saved you time, disk space, or made your media archiving smo
 > - **PromptPay (Thailand)**: Scan the QR Code below to tip directly to the developer (นาย ศตายุ เปรี่ยมพิมาย).
 >
 >   ![PromptPay QR Code](assets/promptpay.jpg)
-> - **Cryptocurrencies**:
->   - **USDT (TRC-20)**: `YOUR_USDT_TRC20_ADDRESS`
->   - **BTC**: `YOUR_BTC_ADDRESS`
->   - **ETH (ERC-20)**: `YOUR_ETH_ERC20_ADDRESS`
 
 ---
 
