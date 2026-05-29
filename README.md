@@ -447,9 +447,6 @@ If this project has saved you time, disk space, or made your media archiving smo
 
 > [!TIP]
 > - **Buy Me a Coffee**: [buymeacoffee.com/Chokechai](https://www.buymeacoffee.com/Chokechai)
-> - **PromptPay (Thailand)**: Scan the QR Code below to tip directly to the developer (นาย ศตายุ เปรี่ยมพิมาย).
->
->   ![PromptPay QR Code](assets/promptpay.jpg)
 
 ---
 
