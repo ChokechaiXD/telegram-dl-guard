@@ -297,3 +297,23 @@ Input:focus, Select:focus, TextArea:focus {
     margin-top: 1;
     margin-bottom: 1;
 }
+
+#target-groups-checkbox-row {
+    height: auto;
+    align: left top;
+}
+
+#setting-target-groups-container {
+    background: #090b0f;
+    border: solid #1f2937;
+    height: 10;
+    width: 1fr;
+    padding: 1;
+    overflow-y: scroll;
+}
+
+#setting-target-groups-container Checkbox {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+}

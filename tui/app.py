@@ -11,7 +11,7 @@ from typing import Any
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Header, Footer, Static, Button, RichLog, Input, Select, Switch, DirectoryTree, TextArea
+from textual.widgets import Header, Footer, Static, Button, RichLog, Input, Select, Switch, DirectoryTree, TextArea, Checkbox
 from textual.binding import Binding
 
 from config import AppConfig
@@ -643,7 +643,35 @@ class GuardApp(App):
             # Group 1: Auth
             self.query_one("#setting-api-id", Input).value = str(cfg.api_id or "")
             self.query_one("#setting-api-hash", Input).value = str(cfg.api_hash or "")
-            self.query_one("#setting-target-groups", Input).value = str(cfg.target_groups or "")
+            # Target Groups Checkbox list row
+            try:
+                import sqlite3
+                conn = sqlite3.connect("logs/guard.db")
+                cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
+                db_groups = cursor.fetchall()
+                conn.close()
+                
+                active_gids = {g.strip() for g in (cfg.target_groups or "").split(",") if g.strip()}
+                
+                container = self.query_one("#setting-target-groups-container")
+                container.remove_children()
+                
+                # Populated Checkboxes from cache
+                matched_gids = set()
+                for gid, title in db_groups:
+                    gid_str = str(gid)
+                    val = gid_str in active_gids
+                    if val:
+                        matched_gids.add(gid_str)
+                    check_id = f"grp_check_{gid_str.replace('-', 'neg')}"
+                    container.mount(Checkbox(label=f"{title} ({gid})", value=val, id=check_id))
+                    
+                # Put custom/fallback target IDs that aren't matched in the checkboxes into the Custom input field
+                custom_gids = [g for g in active_gids if g not in matched_gids]
+                self.query_one("#setting-target-groups", Input).value = ",".join(custom_gids)
+            except Exception as ex:
+                logging.getLogger("guard").warning(f"Failed to populate Target Groups checkboxes: {ex}")
+                self.query_one("#setting-target-groups", Input).value = str(cfg.target_groups or "")
             
             # Populate Storage Group Select options from SQLite
             try:
@@ -839,7 +867,28 @@ class GuardApp(App):
             storage_select_val = self.query_one("#setting-storage-id", Select).value
             storage_id = str(storage_select_val).strip() if (storage_select_val and str(storage_select_val) != "Select.BLANK" and storage_select_val != getattr(Select, "BLANK", None)) else ""
             
-            target_groups = self.query_one("#setting-target-groups", Input).value.strip()
+            # Retrieve target groups from checkboxes and custom text input field
+            checked_gids = []
+            try:
+                container = self.query_one("#setting-target-groups-container")
+                for chk in container.query(Checkbox):
+                    if chk.value:
+                        chk_id = chk.id
+                        gid_str = chk_id.replace("grp_check_", "").replace("neg", "-")
+                        checked_gids.append(gid_str)
+            except Exception as chk_ex:
+                logging.getLogger("guard").warning(f"Failed to read target group checkboxes during save: {chk_ex}")
+
+            custom_gids_str = self.query_one("#setting-target-groups", Input).value.strip()
+            custom_gids = [g.strip() for g in custom_gids_str.split(",") if g.strip()]
+            
+            all_gids = []
+            seen = set()
+            for g in checked_gids + custom_gids:
+                if g not in seen:
+                    seen.add(g)
+                    all_gids.append(g)
+            target_groups = ",".join(all_gids)
             
             # Group 2: Download
             download_dir = self.query_one("#setting-download-dir", Input).value.strip()

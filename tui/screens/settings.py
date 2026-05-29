@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Label, Button, Input, Select, Switch, TextArea
+from textual.widgets import Label, Button, Input, Select, Switch, TextArea, Checkbox
 
 class SettingsContainer(VerticalScroll):
     """Container holding all the dynamic forms for system configuration."""
@@ -19,10 +19,13 @@ class SettingsContainer(VerticalScroll):
             with Horizontal(classes="setting-row"):
                 yield Label("Storage Group:")
                 yield Select(options=[], id="setting-storage-id", prompt="Select Storage Group")
-            with Horizontal(classes="setting-row"):
-                yield Label("Target Groups (IDs):")
-                yield Input(placeholder="Comma-separated group/channel IDs", id="setting-target-groups")
+            with Horizontal(classes="setting-row", id="target-groups-checkbox-row"):
+                yield Label("Select Target Groups:")
+                yield Vertical(id="setting-target-groups-container")
                 yield Button("Sync Groups", variant="default", id="btn-sync-groups")
+            with Horizontal(classes="setting-row"):
+                yield Label("Custom Target IDs:")
+                yield Input(placeholder="Comma-separated group/channel IDs (e.g. -100123456)", id="setting-target-groups")
         
         # GROUP 2: Download & Directories
         with Vertical(classes="settings-group"):
