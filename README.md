@@ -399,6 +399,23 @@ Two cleanup mechanisms run in the background:
 
 ---
 
+## 🔒 Privacy, Security & Trademark Notice
+
+### 1. Zero Telemetry & Privacy Guarantee
+This application is **100% local, offline-first, and open-source**. It contains **no telemetry, no tracking, and no analytics**. 
+- The developer does **not** collect, store, or process any of your personal data, session files (`.session`), download histories, or API credentials. 
+- All credentials and files are stored strictly on your local machine.
+
+### 2. Unofficial Fork Warning
+ONLY download this Software from the official repository: [github.com/ChokechaiXD/telegram-dl-guard](https://github.com/ChokechaiXD/telegram-dl-guard). 
+- The developer accepts **no responsibility or liability** for modified, third-party, or unofficial forks. 
+- Unofficial forks may contain security vulnerabilities, backdoors, credential-harvesting malware, or modified licenses.
+
+### 3. Trademark Disclaimer
+This Software is an unofficial third-party client. It is **not** affiliated with, authorized, sponsored, endorsed by, or in any way associated with Telegram FZ-LLC, Telegram Messenger LLP, or any of their affiliates. The name "Telegram" is a registered trademark of its respective owners.
+
+---
+
 ## 📋 Requirements
 
 ```
