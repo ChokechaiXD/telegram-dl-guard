@@ -7,6 +7,7 @@ by listener.run() before any handler fires.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import mimetypes
@@ -20,8 +21,8 @@ from telethon.tl.types import (
     MessageMediaPhoto,
 )
 
-from hash_cache import HashCache
-from utils import sanitize_filename
+from core.state import HashCache, is_hash_exists
+from core.utils import sanitize_filename
 
 log = logging.getLogger("guard.listener")
 
@@ -30,6 +31,7 @@ log = logging.getLogger("guard.listener")
 _hashes = HashCache(max_size=2048)
 _sender_cache: dict[int, tuple[str, str | None]] = {}  # sid -> (name, username)
 _group_name_cache: dict[int, str] = {}
+_rules: list = []
 DL_DIR: Path = Path("downloads")
 DL_SEM = None  # type: ignore
 CFG = None  # type: ignore
@@ -63,6 +65,11 @@ def _file_hash(path: Path) -> str | None:
         return digest
     except OSError:
         return None
+
+
+async def _file_hash_async(path: Path) -> str | None:
+    """Non-blocking SHA256 hash computation via thread pool."""
+    return await asyncio.to_thread(_file_hash, path)
 
 
 def _ensure_dir(p: Path) -> None:
@@ -133,7 +140,9 @@ async def _resolve_sender_info(event) -> tuple[str, str | None]:
 
         first = getattr(s, "first_name", None) or ""
         last = getattr(s, "last_name", None) or ""
-        name = _sanitize(f"{first} {last}".strip()) or "unknown"
+        name = _sanitize(f"{first} {last}".strip())
+        if not name:
+            name = f"unknown_{sid}" if sid is not None else "unknown"
         username = getattr(s, "username", None)
         username_str = str(username) if username else None
 
@@ -176,7 +185,11 @@ async def _resolve_peer_ids(client, groups_str: str) -> set[int]:
         if not g:
             continue
         try:
-            e = await client.get_entity(int(g))
+            try:
+                entity_key = int(g)
+            except ValueError:
+                entity_key = g
+            e = await client.get_entity(entity_key)
             ids.add(e.id)
             log.info("Group: %s", getattr(e, "title", g))
         except Exception as ex:
@@ -187,6 +200,7 @@ async def _resolve_peer_ids(client, groups_str: str) -> set[int]:
 def _resolve_download_path(fpath: Path, msize: int | None, msg_id: int) -> Path | None:
     """Decide whether/where to download. Returns None to skip, or Path to write to."""
     cfg = _cfg()
+    _ensure_dir(fpath.parent)
     if not fpath.exists():
         return fpath
 
@@ -194,10 +208,18 @@ def _resolve_download_path(fpath: Path, msize: int | None, msg_id: int) -> Path 
     is_dup = False
     if fpath.exists():
         if cfg.dedup_method == "hash":
-            fh = _file_hash(fpath)
-            is_dup = fh is not None and fh in _hashes
+            # Check in-memory cache only (no blocking disk I/O)
+            # Full hash is computed async during download, so cache is warm
+            fh = _hashes.get(f"{fpath}:{fpath.stat().st_mtime}")
+            if fh:
+                is_dup = is_hash_exists(fh) or (fh in _hashes) or _hashes.has_value(fh)
+            else:
+                # Fallback to size check if cache is cold (extremely safe and avoids download)
+                if msize is not None:
+                    is_dup = fpath.stat().st_size == msize
         elif msize is not None:
             is_dup = fpath.stat().st_size == msize
+
 
     if cfg.dedownload == "always":
         fpath.unlink(missing_ok=True)

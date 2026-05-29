@@ -1,6 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-Logging setup — rotating file handler + console handler.
-Levels per module via config.
+Shared utility and logging setup functions.
 """
 from __future__ import annotations
 
@@ -45,3 +45,25 @@ def setup_logging(level: str = "INFO", log_file: bool = True, log_dir: str = "lo
 
     # Reduce Telethon noise
     logging.getLogger("telethon").setLevel(logging.WARNING)
+
+
+def format_bytes(n: int) -> str:
+    """Format bytes to human-readable string."""
+    if n >= 1_073_741_824:
+        return f"{n / 1_073_741_824:.1f} GB"
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.1f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n} B"
+
+
+def sanitize_filename(s: str) -> str:
+    """Remove invalid filename characters."""
+    return "".join(c for c in s if c not in r'<>:"/\|?*' and c.isprintable()).strip() or "unknown"
+
+
+def sanitize_group(name: str) -> str:
+    """Sanitize group name for use as folder name."""
+    s = sanitize_filename(name) if name else ""
+    return s[:60] or "unknown_group"

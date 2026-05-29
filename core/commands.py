@@ -12,8 +12,8 @@ import time
 from telethon import events
 
 from config import AppConfig
-from upload_tracker import scan_downloads, get_stats
-from utils import format_bytes
+from core.state import get_stats, GLOBAL_STATUS
+from core.utils import format_bytes
 
 log = logging.getLogger("guard.commands")
 
@@ -62,16 +62,12 @@ class CommandHandler:
 
             elif cmd == "stats":
                 stats = get_stats()
-                ups = scan_downloads()
-                today_ok = sum(1 for u in ups if u["uploaded"])
-                today_size = sum(u["size"] for u in ups if u["uploaded"])
                 await event.reply(
                     f"Storage Stats\n"
                     f"Total: {stats['total']}\n"
                     f"Uploaded: {stats['uploaded']}\n"
                     f"Pending: {stats['pending']}\n"
-                    f"Size: {format_bytes(stats['total_size'])}\n"
-                    f"Today: {today_ok} files ({format_bytes(today_size)})"
+                    f"Size: {format_bytes(stats['total_size'])}"
                 )
 
             elif cmd == "pause":
@@ -80,6 +76,7 @@ class CommandHandler:
                 else:
                     self._paused = True
                     self._paused_at = time.time()
+                    GLOBAL_STATUS["paused"] = True
                     await event.reply("Paused")
 
             elif cmd == "resume":
@@ -87,6 +84,7 @@ class CommandHandler:
                     await event.reply("Already running")
                 else:
                     self._paused = False
+                    GLOBAL_STATUS["paused"] = False
                     paused_for = int(time.time() - self._paused_at)
                     await event.reply(f"Resumed (was paused for {paused_for}s)")
 

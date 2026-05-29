@@ -13,26 +13,39 @@ import signal as _signal
 import sys
 import time
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from telethon import TelegramClient, events
 from telethon.errors import AuthKeyDuplicatedError, FloodWaitError, TimedOutError
 from telethon.sessions import StringSession
 
 from config import AppConfig
-from core.cleanup import _cleanup_task
+from core.cleanup import _cleanup_task, _aggressive_uploaded_cleanup_task
 import core.download_handler as dh
 from core.download_handler import (
-    _cfg, _extract_peer_id, _file_hash,
+    _cfg, _extract_peer_id, _file_hash, _file_hash_async,
     _fmt_speed, _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir,
 )
-from core.state import load_state
-from rules import load_rules, compile_rules, evaluate_rules
+from core.state import (
+    load_state, GLOBAL_STATUS, ACTIVE_DOWNLOADS, ACTIVE_TASKS,
+    ACTIVE_UPLOADS, get_pending_details, remove_entry, persist_state,
+    mark_pending
+)
+from core.rules import load_rules, compile_rules, evaluate_rules
+from core.utils import sanitize_group
+from core.config_reloader import ConfigReloader
+from core.commands import CommandHandler
+from uploader import upload_worker
 
 log = logging.getLogger("guard.listener")
 _MAX_PROCESSED = 50000
+MAX_PENDING = 50  # hard limit for fire-and-forget download tasks
+_pending_tasks: set[asyncio.Task] = set()
+ALBUM_BUFFER: dict[int, dict[str, Any]] = {}
 
 
 # ── Dedup cache ─────────────────────────────────────────────────
@@ -97,16 +110,23 @@ async def _pre_check(
         return None
 
     mt = _mtype(msg.media)
-    if mt not in media_set:
+    is_super = getattr(dh.CFG, "super_grabber_mode", False) if dh.CFG else False
+    if not is_super and mt not in media_set:
         return None
 
     sender, username = await _resolve_sender_info(event)
 
-    if blocked and sender.lower() in blocked:
+    if not is_super and blocked and sender.lower() in blocked:
         return None
 
     file_size = getattr(getattr(msg.media, "document", None), "size", 0) or 0
-    if min_file_size > 0 and mt != "photo" and file_size < min_file_size * 1024:
+    if not is_super and min_file_size > 0 and mt != "photo" and file_size < min_file_size * 1024:
+        return None
+
+    # Max file size guardrail (MB)
+    max_file_size_mb = getattr(dh.CFG, "max_file_size", 0) if dh.CFG else 0
+    if not is_super and max_file_size_mb > 0 and file_size > max_file_size_mb * 1_048_576:
+        log.debug("Skip: file too large (%d bytes > %d MB limit)", file_size, max_file_size_mb)
         return None
 
     group_name = await _resolve_group_name(event)
@@ -120,83 +140,157 @@ async def _do_download(
     client, msg, fpath: Path, ddir: Path, mt: str, sender: str,
     username: str | None, group_name: str, original_caption: str,
     album_group, file_size: int, upload_queue, dedup_method: str,
-    show_speed: bool, today_stats: dict | None = None,
+    show_speed: bool, priority: bool = False,
 ) -> bool:
-    """Download media file. Returns True on success."""
+    # Throttle download if active uploads backlog is too large to prevent local disk build-up
+    if upload_queue is not None:
+        while len(ACTIVE_UPLOADS) >= 5:
+            await asyncio.sleep(0.5)
+
     async with dh.DL_SEM:
         _ensure_dir(ddir)
         t0 = asyncio.get_event_loop().time()
 
-        progress_cb = None
-        if file_size > 5_242_880:
-            def _progress(cur, total):
-                pct = cur / total * 100 if total else 0
-                print(f"\r  [{pct:.0f}% {cur/1024/1024:.1f}MB/{total/1024/1024:.1f}MB]", end="", flush=True)
-            progress_cb = _progress
+        # Register running task reference
+        ACTIVE_TASKS[msg.id] = asyncio.current_task()
 
-        for attempt in range(3):
-            try:
-                ok = await client.download_media(msg.media, file=str(fpath), progress_callback=progress_cb)
-                if progress_cb:
-                    print()
-                if ok and fpath.exists():
-                    sz = fpath.stat().st_size
-                    elapsed = asyncio.get_event_loop().time() - t0
-                    speed = sz / elapsed if elapsed > 0 else 0
+        # Initialize active download entry in memory
+        ACTIVE_DOWNLOADS[msg.id] = {
+            "filename": fpath.name,
+            "current": 0,
+            "total": file_size or 1,
+            "speed": "0 B/s",
+            "eta": "ETA: ?"
+        }
 
-                    if dedup_method == "hash":
-                        fh = _file_hash(fpath)
-                        if fh:
-                            _hashes.put(fh, str(fpath))
+        # Custom progress callback to feed TUI ProgressBar real-time
+        # Throttled to avoid dict churn on every 64KB chunk.
+        _last_prog_update = 0.0
 
-                    ss = f" ({_fmt_speed(speed)})" if show_speed and speed > 0 else ""
-                    print(f"  [{mt}] {sender}/{fpath.name} ({sz / 1_048_576:.1f}MB{ss})")
-                    sys.stdout.flush()
+        def _progress(cur, total):
+            nonlocal _last_prog_update
+            t_now = asyncio.get_event_loop().time()
+            # Throttle: update at most every 0.3 seconds
+            if t_now - _last_prog_update < 0.3 and cur < (total or cur + 1):
+                return
+            _last_prog_update = t_now
+            elapsed = t_now - t0
+            speed_bps = cur / elapsed if elapsed > 0 else 0
+            
+            # Format download speed
+            if speed_bps >= 1_048_576:
+                speed_str = f"{speed_bps / 1_048_576:.1f} MB/s"
+            elif speed_bps >= 1024:
+                speed_str = f"{speed_bps / 1024:.1f} KB/s"
+            else:
+                speed_str = f"{speed_bps:.0f} B/s"
+                
+            # ETA calculation safely
+            total_val = total if (total is not None and total > 0) else 0
+            remaining = total_val - cur if total_val > 0 else 0
+            if total_val > 0 and speed_bps > 0:
+                eta_sec = int(remaining / speed_bps)
+                eta_str = f"ETA: {eta_sec}s"
+            else:
+                eta_str = "ETA: ?"
+                
+            ACTIVE_DOWNLOADS[msg.id] = {
+                "filename": fpath.name,
+                "current": cur,
+                "total": total_val or cur or 1,
+                "speed": speed_str,
+                "eta": eta_str
+            }
 
-                    if upload_queue is not None:
-                        upload_queue.put_nowait(
-                            (str(fpath), sender, username, msg.date,
-                             group_name, original_caption, album_group)
-                        )
-                    # Track for TUI
-                    if today_stats:
-                        today_stats["t"]["downloaded"] += 1
-                        today_stats["t"]["uploaded"] += 1
-                        today_stats["t"]["bytes"] += sz
-                        today_stats["recent"].append({"ok": True, "msg": f"{mt} {sender}/{fpath.name} ({sz/1_048_576:.1f}MB)"})
-                        if len(today_stats["recent"]) > 50:
-                            today_stats["recent"].pop(0)
-                    return True
-                else:
+        try:
+            for attempt in range(3):
+                try:
+                    ok = await client.download_media(msg.media, file=str(fpath), progress_callback=_progress)
+                    if ok and fpath.exists():
+                        sz = fpath.stat().st_size
+                        elapsed = asyncio.get_event_loop().time() - t0
+                        speed = sz / elapsed if elapsed > 0 else 0
+
+                        fh = None
+                        if dedup_method == "hash":
+                            fh = await _file_hash_async(fpath)
+                            if fh:
+                                _hashes.put(fh, str(fpath))
+
+                        ss = f" ({_fmt_speed(speed)})" if show_speed and speed > 0 else ""
+                        log_msg = f"[{mt}] {sender}/{fpath.name} ({sz / 1_048_576:.1f}MB{ss})"
+                        print(f"  {log_msg}")
+                        sys.stdout.flush()
+                        log.info(log_msg)
+
+                        if upload_queue is not None:
+                            mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
+                            ACTIVE_UPLOADS.add(str(fpath))
+                            # Priority key: size_asc=small first, size_desc=large first, fifo=order
+                            if priority:
+                                pkey = -999999999
+                            else:
+                                _prio = dh.CFG.download_priority if dh.CFG else "fifo"
+                                if _prio == "size_asc":
+                                    pkey = sz
+                                elif _prio == "size_desc":
+                                    pkey = -sz
+                                else:
+                                    pkey = GLOBAL_STATUS.get("processed", 0)
+                            payload = (str(fpath), sender, username, msg.date,
+                                       group_name, original_caption, album_group)
+                            upload_queue.put_nowait((pkey, msg.id, payload))
+                        # Track for TUI
+                        GLOBAL_STATUS["today_downloaded"] += 1
+                        GLOBAL_STATUS["today_bytes"] += sz
+                        GLOBAL_STATUS["processed"] += 1
+                        GLOBAL_STATUS["recent_activity"].append({"ok": True, "msg": f"{mt} {sender}/{fpath.name} ({sz/1_048_576:.1f}MB)"})
+                        if len(GLOBAL_STATUS["recent_activity"]) > 50:
+                            GLOBAL_STATUS["recent_activity"].pop(0)
+                        return True
+                    else:
+                        if fpath.exists() and fpath.stat().st_size == 0:
+                            fpath.unlink()
+                        log.error(f"FAIL: {sender}/{fpath.name}")
+                        # Track failure
+                        GLOBAL_STATUS["today_failed"] += 1
+                        GLOBAL_STATUS["recent_activity"].append({"ok": False, "msg": f"FAIL {sender}/{fpath.name}"})
+                        if len(GLOBAL_STATUS["recent_activity"]) > 50:
+                            GLOBAL_STATUS["recent_activity"].pop(0)
+                        return False
+
+                except FloodWaitError as e:
+                    await asyncio.sleep(e.seconds)
+                    if attempt == 2:
+                        return False
+                except (OSError, TimedOutError):
+                    await asyncio.sleep(2 * (attempt + 1))
+                except asyncio.CancelledError:
+                    log.warning("Download cancelled by user request: %s", fpath.name)
+                    if fpath.exists():
+                        try:
+                            fpath.unlink()
+                        except Exception:
+                            pass
+                    raise
+                except Exception as e:
+                    log.error("Download error: %s", e)
                     if fpath.exists() and fpath.stat().st_size == 0:
                         fpath.unlink()
-                    # Track failure
-                    if today_stats:
-                        today_stats["t"]["failed"] += 1
-                        today_stats["recent"].append({"ok": False, "msg": f"FAIL {sender}/{fpath.name}"})
-                        if len(today_stats["recent"]) > 50:
-                            today_stats["recent"].pop(0)
                     return False
-
-            except FloodWaitError as e:
-                await asyncio.sleep(e.seconds)
-                if attempt == 2:
-                    return False
-            except (OSError, TimedOutError):
-                await asyncio.sleep(2 * (attempt + 1))
-            except Exception as e:
-                log.error("Download error: %s", e)
-                if fpath.exists() and fpath.stat().st_size == 0:
-                    fpath.unlink()
-                return False
-        return False
+            return False
+        finally:
+            # Guarantee cleanup of memory dict to prevent TUI progress row freeze on cancels or failures
+            ACTIVE_DOWNLOADS.pop(msg.id, None)
+            ACTIVE_TASKS.pop(msg.id, None)
 
 
 # ── Main listener ──────────────────────────────────────────────
 
-
-async def run() -> None:
-    import core.download_handler as dh
+async def run(provided_client: TelegramClient | None = None) -> None:
+    ACTIVE_UPLOADS.clear()
+    GLOBAL_STATUS["running"] = True
+    GLOBAL_STATUS["uptime_start"] = time.time()
 
     dh.CFG = AppConfig.load()
     dh.DL_DIR = Path(dh.CFG.download_dir)
@@ -210,116 +304,167 @@ async def run() -> None:
     # State
     processed = _DedupCache()
     state_processed, _group_name_cache = load_state()
-    # Fix #3: state_processed is a list of ints from load_state()
-    if isinstance(state_processed, dict):
-        for mid in state_processed:
-            processed.add(int(mid))
-    else:
-        for mid in state_processed:
-            processed.add(int(mid))
+    for mid in state_processed:
+        processed.add(int(mid))
     dh._group_name_cache = _group_name_cache
 
     # Rules
-    _rules = compile_rules(load_rules())
-    if _rules:
-        print(f"  Rules: {len(_rules)} rules loaded")
+    dh._rules = compile_rules(load_rules())
+    if dh._rules:
+        print(f"  Rules: {len(dh._rules)} rules loaded")
 
     # Filters
     media_set = {t.strip() for t in CFG.media_types.split(",") if t.strip()}
     blocked = [s.strip().lower() for s in CFG.blocked_senders.split(",") if s.strip()] if CFG.blocked_senders else []
-    # Fix #4: removed unused fe = FilterEngine(...)
 
-    # Client
-    client = TelegramClient(
-        StringSession(CFG.session_string) if CFG.session_string else StringSession(),
-        CFG.api_id, CFG.api_hash,
-        connection_retries=10, retry_delay=5, auto_reconnect=True,
-    )
+    # Client Setup
+    if provided_client is not None:
+        client = provided_client
+    else:
+        client = TelegramClient(
+            StringSession(CFG.session_string) if CFG.session_string else StringSession(),
+            CFG.api_id, CFG.api_hash,
+            connection_retries=10, retry_delay=5, auto_reconnect=True,
+        )
 
     peer_ids: set[int] = set()
     if CFG.target_groups:
-        if not await connect_retry(client):
-            return
+        if provided_client is None:
+            if not await connect_retry(client):
+                GLOBAL_STATUS["running"] = False
+                return
         peer_ids = await _resolve_peer_ids(client, CFG.target_groups)
 
     if not peer_ids:
         print("  No valid groups.")
+        GLOBAL_STATUS["running"] = False
         return
-
-    if CFG.history_enabled:
-        log.warning("History scan enabled but history.py unavailable")
-
-    print(f"  Peers: {len(peer_ids)} | media={','.join(sorted(media_set))} | dedup={CFG.dedup_method}")
-    print(f"  Download dir: {DL_DIR}")
 
     # Upload worker
     upload_queue = None
     upload_task = None
     if CFG.upload_enabled and CFG.storage_group_id:
-        from uploader import upload_worker
-        upload_queue = asyncio.Queue()
+        upload_queue = asyncio.PriorityQueue()
         try:
             storage_gid = int(CFG.storage_group_id)
             upload_mode = os.getenv("UPLOAD_MODE", "realtime_keep")
-            upload_task = asyncio.create_task(upload_worker(client, storage_gid, upload_queue, upload_mode))
-            print(f"  Upload: {upload_mode} -> {storage_gid}")
+            upload_workers = max(1, min(CFG.upload_workers, 5))
+            upload_task = asyncio.create_task(upload_worker(client, storage_gid, upload_queue, upload_mode, upload_workers))
+            print(f"  Upload: {upload_mode} -> {storage_gid} (workers={upload_workers})")
+            
+            # Enqueue previous pending uploads on startup to resume uploading seamlessly
+            pending_items = get_pending_details()
+            enqueued_count = 0
+            for item in pending_items:
+                fpath = Path(item["filepath"])
+                if fpath.exists():
+                    sz = item["size"] or fpath.stat().st_size
+                    _prio = CFG.download_priority
+                    if _prio == "size_asc":
+                        pkey = sz
+                    elif _prio == "size_desc":
+                        pkey = -sz
+                    else:
+                        pkey = enqueued_count
+                    
+                    # Construct payload
+                    dt = datetime.fromtimestamp(fpath.stat().st_mtime)
+                    payload = (str(fpath), item["sender_name"], None, dt,
+                               item["source_group"], item["original_caption"], None)
+                    
+                    ACTIVE_UPLOADS.add(str(fpath))
+                    # PriorityQueue format: (priority, seq, payload)
+                    upload_queue.put_nowait((pkey, 999000 + enqueued_count, payload))
+                    enqueued_count += 1
+                else:
+                    # File no longer exists, remove entry to keep DB clean
+                    remove_entry(item["filepath"])
+            
+            if enqueued_count > 0:
+                print(f"  [OK] Enqueued {enqueued_count} pending files from previous session for upload.")
         except ValueError:
             print(f"  Upload: invalid storage_group_id: {CFG.storage_group_id!r}")
     else:
         print("  Upload: disabled")
 
+    if CFG.history_enabled:
+        try:
+            from core.history import run_history_scan
+            asyncio.create_task(run_history_scan(
+                client=client,
+                peer_ids=peer_ids,
+                cfg=CFG,
+                upload_queue=upload_queue,
+                download_sem=dh.DL_SEM,
+                show_speed=CFG.show_speed
+            ))
+            log.info("History scan started in background")
+        except Exception as e:
+            log.error("Failed to initialize history scan: %s", e)
+
+    print(f"  Peers: {len(peer_ids)} | media={','.join(sorted(media_set))} | dedup={CFG.dedup_method}")
+    print(f"  Download dir: {DL_DIR}")
+
     asyncio.create_task(_cleanup_task(_cfg))
+    asyncio.create_task(_aggressive_uploaded_cleanup_task())
 
     # Config hot-reload
-    from core.config_reloader import ConfigReloader
     _reloader = ConfigReloader()
     asyncio.create_task(_reloader.start())
 
     # Commands (Telegram)
-    from core.commands import CommandHandler
     _cmd_handler = CommandHandler()
     asyncio.create_task(_cmd_handler.start(client))
 
     sys.stdout.flush()
 
     def _persist():
-        from core.state import persist_state
         persist_state(dict(processed), _group_name_cache)
 
     atexit.register(_persist)
 
     # ── Event handlers ─────────────────────────────────────────
 
-    # Fix #6: Album handler registered FIRST so Telethon processes album events
-    # before NewMessage. Album has grouped_id which includes all items.
-    # NewMessage handler skips items that have grouped_id (they belong to album).
-    @client.on(events.Album)
-    async def _on_album(event) -> None:
-        nonlocal total
-        msgs = event.messages
+    # ── Event handlers ─────────────────────────────────────────
+
+    async def _flush_album_after_delay(grouped_id: int, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        album_data = ALBUM_BUFFER.pop(grouped_id, None)
+        if not album_data:
+            return
+
+        msgs = album_data["messages"]
+        event = album_data["event"]
         if not msgs:
             return
 
+        # Sort messages sequentially to preserve chronological ordering
+        msgs.sort(key=lambda m: m.id)
         first_msg = msgs[0]
-        first_gid = getattr(first_msg, "grouped_id", None)
 
-        # Pre-check first message
-        if _cmd_handler.is_paused():
+        if _cmd_handler.is_paused() or GLOBAL_STATUS["paused"]:
             for m in msgs:
                 processed.add(m.id)
             return
 
-        r = await _pre_check(event, first_msg, peer_ids, media_set, blocked, CFG.min_file_size)
+        media_set_dyn = {t.strip() for t in dh.CFG.media_types.split(",") if t.strip()}
+        blocked_dyn = [s.strip().lower() for s in dh.CFG.blocked_senders.split(",") if s.strip()] if dh.CFG.blocked_senders else []
+
+        r = await _pre_check(event, first_msg, peer_ids, media_set_dyn, blocked_dyn, dh.CFG.min_file_size)
         if r is None:
             for m in msgs:
                 processed.add(m.id)
             return
+
         sender, username, group_name, _, _ = r
         original_caption = (getattr(first_msg, "message", None) or "").strip()
-        ddir = DL_DIR / _sanitize_group(group_name) / sender
+        ddir = Path(dh.CFG.download_dir) / _sanitize_group(group_name) / sender
         _ensure_dir(ddir)
 
-        # Collect all valid download tasks
+        # Collect download tasks for all messages in the album
         tasks = []
         for msg in msgs:
             if msg.id in processed:
@@ -330,80 +475,129 @@ async def run() -> None:
                 continue
 
             mt = _mtype(msg.media)
-            if mt not in media_set:
+            if not getattr(dh.CFG, "super_grabber_mode", False) and mt not in media_set_dyn:
                 continue
 
             fname = _media_name(msg.media, msg.date, msg.id)
             fpath = ddir / fname
             fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
+
+            # Rule engine (bypassed in super grabber mode)
+            rule_priority = False
+            if dh._rules and not getattr(dh.CFG, "super_grabber_mode", False):
+                rule_action = evaluate_rules(dh._rules, sender, fname, mt, fsize, group_name)
+                if rule_action:
+                    if rule_action.skip:
+                        continue
+                    rule_priority = rule_action.priority
+                    if rule_action.tag:
+                        if original_caption and f"#{rule_action.tag}" not in original_caption:
+                            original_caption = f"{original_caption} #{rule_action.tag}".strip()
+                    if rule_action.move_to:
+                        from core.rules import move_to_folder
+                        fpath = move_to_folder(fpath, rule_action.move_to)
+
             fpath = _resolve_download_path(fpath, fsize or None, msg.id)
             if fpath is None:
                 continue
 
-            _ts = {"t": _today, "recent": _recent_activity}
             tasks.append(
                 _do_download(
-                    client, msg, fpath, ddir, mt, sender, username,
-                    group_name, original_caption, first_gid, fsize,
-                    upload_queue, CFG.dedup_method, CFG.show_speed,
-                    today_stats=_ts,
+                    client, msg, fpath, fpath.parent, mt, sender, username,
+                    group_name, original_caption, grouped_id, fsize,
+                    upload_queue, dh.CFG.dedup_method, dh.CFG.show_speed,
+                    priority=rule_priority,
                 )
             )
 
-        # Download all in parallel
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for ok in results:
-                if ok is True:
-                    total += 1
-                elif isinstance(ok, Exception):
+                if isinstance(ok, Exception):
                     log.error("Album error: %s", ok)
 
     @client.on(events.NewMessage)
     async def _on_msg(event) -> None:
-        nonlocal total
+        if _cmd_handler.is_paused() or GLOBAL_STATUS["paused"]:
+            return
+
         msg = event.message
 
-        # Fix #6: Skip album items (they are handled by _on_album)
-        if getattr(msg, "grouped_id", None) is not None:
+        # Intercept and buffer albums robustly in-memory
+        grouped_id = getattr(msg, "grouped_id", None)
+        if grouped_id is not None:
+            if msg.id in processed:
+                return
+            if grouped_id not in ALBUM_BUFFER:
+                ALBUM_BUFFER[grouped_id] = {
+                    "messages": [msg],
+                    "event": event,
+                    "task": None
+                }
+            else:
+                if msg.id not in [m.id for m in ALBUM_BUFFER[grouped_id]["messages"]]:
+                    ALBUM_BUFFER[grouped_id]["messages"].append(msg)
+            
+            # Debounce: Cancel previous scheduled flush to extend the sliding window
+            old_task = ALBUM_BUFFER[grouped_id].get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+                
+            new_task = asyncio.create_task(_flush_album_after_delay(grouped_id, 1.5))
+            ALBUM_BUFFER[grouped_id]["task"] = new_task
             return
 
         if msg.id in processed:
             return
         processed.add(msg.id)
 
-        if _cmd_handler.is_paused():
+        if _cmd_handler.is_paused() or GLOBAL_STATUS["paused"]:
             return
 
-        r = await _pre_check(event, msg, peer_ids, media_set, blocked, CFG.min_file_size)
+        media_set_dyn = {t.strip() for t in dh.CFG.media_types.split(",") if t.strip()}
+        blocked_dyn = [s.strip().lower() for s in dh.CFG.blocked_senders.split(",") if s.strip()] if dh.CFG.blocked_senders else []
+
+        r = await _pre_check(event, msg, peer_ids, media_set_dyn, blocked_dyn, dh.CFG.min_file_size)
         if r is None:
             return
         sender, username, group_name, mt, file_size = r
 
-        # Rule engine
+        # Rule engine (bypassed in super grabber mode)
         fname = _media_name(msg.media, msg.date, msg.id)
-        if _rules:
-            rule_action = evaluate_rules(_rules, sender, fname, mt, file_size, group_name)
-            if rule_action and rule_action.skip:
-                return
+        fpath = Path(dh.CFG.download_dir) / _sanitize_group(group_name) / sender / fname
+        original_caption = (getattr(msg, "message", None) or "").strip()
 
-        fpath = DL_DIR / _sanitize_group(group_name) / sender / fname
+        rule_priority = False
+        if dh._rules and not getattr(dh.CFG, "super_grabber_mode", False):
+            rule_action = evaluate_rules(dh._rules, sender, fname, mt, file_size, group_name)
+            if rule_action:
+                if rule_action.skip:
+                    return
+                rule_priority = rule_action.priority
+                if rule_action.tag:
+                    original_caption = f"{original_caption} #{rule_action.tag}".strip()
+                if rule_action.move_to:
+                    from core.rules import move_to_folder
+                    fpath = move_to_folder(fpath, rule_action.move_to)
+
         fpath = _resolve_download_path(fpath, file_size or None, msg.id)
         if fpath is None:
             return
 
-        original_caption = (getattr(msg, "message", None) or "").strip()
-        album_group = None  # single messages have no album_group
+        album_group = None
 
-        _ts = {"t": _today, "recent": _recent_activity}
-        ok = await _do_download(
+        # Fire-and-forget with pending task limiter
+        if len(_pending_tasks) >= MAX_PENDING:
+            done, _ = await asyncio.wait(_pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+            _pending_tasks -= done
+        task = asyncio.create_task(_do_download(
             client, msg, fpath, fpath.parent, mt, sender, username,
             group_name, original_caption, album_group, file_size,
-            upload_queue, CFG.dedup_method, CFG.show_speed,
-            today_stats=_ts,
-        )
-        if ok:
-            total += 1
+            upload_queue, dh.CFG.dedup_method, dh.CFG.show_speed,
+            priority=rule_priority,
+        ))
+        _pending_tasks.add(task)
+        task.add_done_callback(_pending_tasks.discard)
 
     # ── Start listening ────────────────────────────────────────
 
@@ -411,62 +605,13 @@ async def run() -> None:
     _cmd_handler.set_user(me.id)
     print(f"\n  Logged in as: {me.first_name}")
 
-    # IPC — status writer + command reader
-    from core.ipc import write_status, read_command, append_log
-    _ipc_running = True
-    _ipc_start = time.time()
-    _ipc_me = me
-    _today = {"downloaded": 0, "uploaded": 0, "failed": 0, "bytes": 0}
-    _recent_activity: list[dict] = []
-
-    async def _ipc_status_loop() -> None:
-        from utils import format_bytes
-        while _ipc_running:
-            uptime = time.time() - _ipc_start
-            s = {
-                "running": True, "paused": _cmd_handler.is_paused(),
-                "uptime": int(uptime), "processed": total,
-                "user": _ipc_me.first_name,
-                "storage_group": CFG.storage_group_id,
-                "target_groups": CFG.target_groups,
-                "upload_mode": os.getenv("UPLOAD_MODE", "realtime_keep"),
-                "media_types": CFG.media_types, "queue_size": CFG.queue_size,
-                "today_downloaded": _today["downloaded"],
-                "today_uploaded": _today["uploaded"],
-                "today_failed": _today["failed"],
-                "today_size": format_bytes(_today["bytes"]),
-                "storage_total": 0, "storage_uploaded": 0,
-                "storage_pending": 0, "storage_size": "0 B",
-                "recent": _recent_activity[-10:],
-            }
-            write_status(s)
-            await asyncio.sleep(3)
-
-    async def _ipc_command_loop() -> None:
-        while _ipc_running:
-            cmd = read_command()
-            if cmd:
-                action = cmd.get("action")
-                if action == "pause":
-                    _cmd_handler._paused = True
-                    append_log("Paused via TUI")
-                elif action == "resume":
-                    _cmd_handler._paused = False
-                    append_log("Resumed via TUI")
-                elif action == "restart":
-                    append_log("Restart requested via TUI")
-            await asyncio.sleep(1)
-
-    asyncio.create_task(_ipc_status_loop())
-    asyncio.create_task(_ipc_command_loop())
-
-    total = 0
-    print("  Listening... (Ctrl+C to stop)\n")
-    sys.stdout.flush()
+    GLOBAL_STATUS["user"] = me.first_name
+    log.info(f"Listener active (User: {me.first_name})")
 
     if not await client.is_user_authorized():
         log.error("Session not authorized")
         print("  Session not authorized")
+        GLOBAL_STATUS["running"] = False
         return
 
     shutdown = asyncio.Event()
@@ -480,34 +625,57 @@ async def run() -> None:
     except (ValueError, OSError):
         pass
 
-    try:
-        await client.run_until_disconnected()
-        await shutdown.wait()
-    except (OSError, TimedOutError) as e:
-        log.error("Disconnected: %s", e)
-    except AuthKeyDuplicatedError:
-        log.error("Session expired")
-    except Exception as e:
-        log.error("Listener error: %s: %s", type(e).__name__, e)
-    finally:
-        if upload_queue is not None:
-            await upload_queue.put(None)
-        if upload_task is not None:
-            try:
-                await asyncio.wait_for(upload_task, timeout=30)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                upload_task.cancel()
+    # If the client is provided, we do not call run_until_disconnected here;
+    # TUI will manage the client runtime directly.
+    if provided_client is not None:
+        # Keep background uploader running
         try:
-            await client.disconnect()
-        except Exception:
+            # Sleep indefinitely or until shutdown
+            await shutdown.wait()
+        except asyncio.CancelledError:
             pass
-        _persist()
-        log.info("Stopped. Total: %d", total)
+        finally:
+            if upload_queue is not None:
+                await upload_queue.put((float('inf'), 0, None))
+            if upload_task is not None:
+                try:
+                    await asyncio.wait_for(upload_task, timeout=30)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    upload_task.cancel()
+            _persist()
+            GLOBAL_STATUS["running"] = False
+            log.info("Stopped. Total processed: %d", GLOBAL_STATUS["processed"])
+    else:
+        print("  Listening... (Ctrl+C to stop)\n")
+        sys.stdout.flush()
+        try:
+            await client.run_until_disconnected()
+            await shutdown.wait()
+        except (OSError, TimedOutError) as e:
+            log.error("Disconnected: %s", e)
+        except AuthKeyDuplicatedError:
+            log.error("Session expired")
+        except Exception as e:
+            log.error("Listener error: %s: %s", type(e).__name__, e)
+        finally:
+            if upload_queue is not None:
+                await upload_queue.put((float('inf'), 0, None))
+            if upload_task is not None:
+                try:
+                    await asyncio.wait_for(upload_task, timeout=30)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    upload_task.cancel()
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            _persist()
+            GLOBAL_STATUS["running"] = False
+            log.info("Stopped. Total processed: %d", GLOBAL_STATUS["processed"])
 
 
 def _sanitize_group(name: str) -> str:
     try:
-        from utils import sanitize_group
         return sanitize_group(name)
     except Exception:
         return "".join(c if c.isalnum() or c in "_- " else "_" for c in name)[:50]

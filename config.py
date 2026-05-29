@@ -41,7 +41,14 @@ def _get(env_key: str, yaml_key: str, default: Any = None) -> Any:
     v = os.getenv(env_key)
     if v is not None:
         return v.strip().strip("'\"")
-    return _CFG.get(yaml_key, default)
+    # Resolve dot-notation into nested dict (e.g. "dedup.enabled" -> _CFG["dedup"]["enabled"])
+    node = _CFG
+    for part in yaml_key.split("."):
+        if isinstance(node, dict):
+            node = node.get(part)
+        else:
+            return default
+    return node if node is not None else default
 
 
 def _get_bool(env_key: str, yaml_key: str, default: bool = False) -> bool:
@@ -49,18 +56,6 @@ def _get_bool(env_key: str, yaml_key: str, default: bool = False) -> bool:
     if v is None:
         return default
     return str(v).lower() in ("true", "1", "yes", "on")
-
-
-def _F(key: str, default: Any) -> Any:
-    """Read nested YAML key using dot notation: 'dedup.method'."""
-    keys = key.split(".")
-    v = _CFG
-    for k in keys:
-        if isinstance(v, dict):
-            v = v.get(k, default)
-        else:
-            return default
-    return v if v is not None else default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -109,14 +104,24 @@ class AppConfig:
     # Upload
     storage_group_id: str = ""
     upload_enabled: bool = False
+    
+    # Webhook
+    webhook_enabled: bool = False
+    webhook_url: str = ""
 
     # Filter
     min_file_size: int = 0  # 0 = no filter, in KB
+    max_file_size: int = 0  # 0 = no limit, in MB
     blocked_senders: str = ""  # comma-separated sender names
+    super_grabber_mode: bool = False
 
     # Display
     show_speed: bool = True
     show_eta: bool = True
+
+    # Performance
+    upload_workers: int = 3  # concurrent upload slots (1-5)
+    download_priority: str = "fifo"  # fifo, size_asc, size_desc
 
     # Log
     log_level: str = "INFO"
@@ -124,6 +129,8 @@ class AppConfig:
 
     @classmethod
     def load(cls) -> AppConfig:
+        global _CFG
+        _CFG = _load_yaml()
         return cls(
             api_id=_safe_int(_get("API_ID", "api_id", 0)),
             api_hash=_get("API_HASH", "api_hash", ""),
@@ -131,25 +138,31 @@ class AppConfig:
             target_groups=_get("TARGET_GROUPS", "target_groups", ""),
             media_types=_get("MEDIA_TYPES", "media_types", "photo,video"),
             download_dir=_get("DOWNLOAD_DIR", "download_dir", "./downloads"),
-            folder_date_format=_F("folder_date_format", "%Y%m%d_%H%M"),
-            dedup_enabled=_F("dedup.enabled", True),
-            dedup_method=_F("dedup.method", "size"),
-            dedownload=_F("dedup.redownload", "never"),
-            filename_format=_F("filename_format", "datetime"),
-            history_enabled=_F("history.enabled", False),
-            history_hours=_safe_int(_F("history.hours", 24)),
-            history_mode=_F("history.mode", "list"),
-            history_reverse=_F("history.reverse", True),
-            queue_size=_safe_int(_F("download.max_concurrent", 3), 3),
-            cleanup_enabled=_F("cleanup.enabled", False),
-            cleanup_retention_days=_safe_int(_F("cleanup.retention_days", 30), 30),
-            cleanup_interval_hours=_safe_int(_F("cleanup.interval_hours", 6), 6),
+            folder_date_format=_get("FOLDER_DATE_FORMAT", "folder_date_format", "%Y%m%d_%H%M"),
+            dedup_enabled=_get_bool("DEDUP_ENABLED", "dedup.enabled", True),
+            dedup_method=_get("DEDUP_METHOD", "dedup.method", "size"),
+            dedownload=_get("REDOWNLOAD", "dedup.redownload", "never"),
+            filename_format=_get("FILENAME_FORMAT", "filename_format", "datetime"),
+            history_enabled=_get_bool("HISTORY_ENABLED", "history.enabled", False),
+            history_hours=_safe_int(_get("HISTORY_HOURS", "history.hours", 24)),
+            history_mode=_get("HISTORY_MODE", "history.mode", "list"),
+            history_reverse=_get_bool("HISTORY_REVERSE", "history.reverse", True),
+            queue_size=_safe_int(_get("QUEUE_SIZE", "download.max_concurrent", 3), 3),
+            cleanup_enabled=_get_bool("CLEANUP_ENABLED", "cleanup.enabled", False),
+            cleanup_retention_days=_safe_int(_get("CLEANUP_RETENTION_DAYS", "cleanup.retention_days", 30), 30),
+            cleanup_interval_hours=_safe_int(_get("CLEANUP_INTERVAL_HOURS", "cleanup.interval_hours", 6), 6),
             storage_group_id=_get("STORAGE_GROUP_ID", "storage_group_id", ""),
             upload_enabled=_get_bool("UPLOAD_ENABLED", "upload.enabled", False),
+            webhook_enabled=_get_bool("WEBHOOK_ENABLED", "webhook.enabled", False),
+            webhook_url=_get("WEBHOOK_URL", "webhook.url", ""),
             min_file_size=_safe_int(_get("MIN_FILE_SIZE_KB", "filter.min_file_size", 0)),
+            max_file_size=_safe_int(_get("MAX_FILE_SIZE_MB", "filter.max_file_size", 0)),
             blocked_senders=_get("BLOCKED_SENDERS", "filter.blocked_senders", ""),
-            show_speed=_get_bool("SHOW_SPEED", _F("display.show_speed", True)),
-            show_eta=_get_bool("SHOW_ETA", _F("display.show_eta", True)),
-            log_level=_F("log.level", "INFO"),
-            log_file=_get_bool("LOG_FILE", _F("log.file", True)),
+            super_grabber_mode=_get_bool("SUPER_GRABBER_MODE", "filter.super_grabber", False),
+            show_speed=_get_bool("SHOW_SPEED", "display.show_speed", True),
+            show_eta=_get_bool("SHOW_ETA", "display.show_eta", True),
+            upload_workers=_safe_int(_get("UPLOAD_WORKERS", "upload.workers", 3), 3),
+            download_priority=_get("DOWNLOAD_PRIORITY", "download.priority", "fifo"),
+            log_level=_get("LOG_LEVEL", "log.level", "INFO"),
+            log_file=_get_bool("LOG_FILE", "log.file", True),
         )

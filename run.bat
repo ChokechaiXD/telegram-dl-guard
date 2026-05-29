@@ -12,34 +12,28 @@ if not exist venv\Scripts\python.exe (
 )
 if "%~1"=="" goto menu
 
-if "%~1"=="1" goto listen
-if "%~1"=="2" goto tui
-if "%~1"=="3" goto setup
-if "%~1"=="4" goto guard
+if "%~1"=="1" goto tui
+if "%~1"=="2" goto setup
+if "%~1"=="3" goto listen
+if "%~1"=="4" goto update
 goto menu
 
 :menu
 echo ========================================
-echo   Telegram DL Guard
+echo   Telegram DL Guard v3.9
 echo ========================================
-echo   1 — Start listener
-echo   2 — Interactive TUI
-echo   3 — Setup wizard
-echo   4 — Settings
+echo   1 — Run DL Guard (Interactive TUI)
+echo   2 — Setup Wizard (Initial Login)
+echo   3 — Start Headless Daemon
+echo   4 — Update/Verify Dependencies
 echo   0 — Exit
 echo ========================================
 set /p c="> "
-if "%c%"=="1" goto listen
-if "%c%"=="2" goto tui
-if "%c%"=="3" goto setup
-if "%c%"=="4" goto guard
+if "%c%"=="1" goto tui
+if "%c%"=="2" goto setup
+if "%c%"=="3" goto listen
+if "%c%"=="4" goto update
 if "%c%"=="0" exit /b
-goto menu
-
-:listen
-set PYTHONUNBUFFERED=1
-venv\Scripts\python guard.py --listen
-pause
 goto menu
 
 :tui
@@ -52,7 +46,13 @@ venv\Scripts\python guard.py --setup
 pause
 goto menu
 
-:guard
-venv\Scripts\python guard.py
+:listen
+set PYTHONUNBUFFERED=1
+venv\Scripts\python guard.py --listen
+pause
+goto menu
+
+:update
+venv\Scripts\python run.py 4
 pause
 goto menu

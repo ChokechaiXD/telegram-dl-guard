@@ -13,6 +13,9 @@ downloads/
 logs/
 *.log
 
+# Internal
+.hermes/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,11 +1,6 @@
+# -*- coding: utf-8 -*-
 """
 Rule Engine — declarative condition→action rules for file processing.
-
-Rules are loaded from config.yaml `rules:` section or a separate rules.yaml.
-Each rule: when condition matches → execute action.
-
-Conditions: sender, sender_contains, filename_regex, media_type, file_size_gt/lt, source_group
-Actions: skip, tag, album, priority, move_to
 """
 from __future__ import annotations
 
@@ -13,12 +8,43 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 log = logging.getLogger("guard.rules")
 
 _RULES_FILE = Path("rules.yaml")
+
+
+def parse_size(size_val: Any) -> int | None:
+    """Parse size strings (e.g. '10MB', '500KB', '1.5GB') into bytes."""
+    if size_val is None:
+        return None
+    if isinstance(size_val, int):
+        return size_val
+    s = str(size_val).strip().lower()
+    if not s:
+        return None
+    
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)?$", s)
+    if not m:
+        try:
+            return int(size_val)
+        except (ValueError, TypeError):
+            return None
+            
+    num = float(m.group(1))
+    unit = m.group(2)
+    if unit == "kb":
+        return int(num * 1024)
+    elif unit == "mb":
+        return int(num * 1024 * 1024)
+    elif unit == "gb":
+        return int(num * 1024 * 1024 * 1024)
+    elif unit == "tb":
+        return int(num * 1024 * 1024 * 1024 * 1024)
+    return int(num)
 
 
 @dataclass
@@ -70,8 +96,8 @@ def load_rules(path: Path | None = None) -> list[Rule]:
                 sender_contains=cond_data.get("sender_contains"),
                 filename_regex=cond_data.get("filename_regex"),
                 media_type=cond_data.get("media_type"),
-                file_size_gt=cond_data.get("file_size_gt"),
-                file_size_lt=cond_data.get("file_size_lt"),
+                file_size_gt=parse_size(cond_data.get("file_size_gt")),
+                file_size_lt=parse_size(cond_data.get("file_size_lt")),
                 source_group=cond_data.get("source_group"),
             )
             act_data = r.get("action", {})
@@ -114,21 +140,23 @@ def evaluate_rules(
     source_group: str,
 ) -> RuleAction | None:
     """Evaluate all rules against a file. Returns first matching action or None."""
-    normalized_sender = sender.lower().strip()
+    normalized_sender = str(sender).lower().strip()
+    normalized_media = str(media_type).lower().strip()
+    normalized_group = str(source_group).lower().strip()
 
     for rule, pattern in compiled_rules:
         c = rule.condition
 
-        # Check each condition
-        if c.sender and c.sender.lower() != normalized_sender:
+        # Check each condition with safe string conversions to prevent crash on non-string inputs
+        if c.sender and str(c.sender).lower().strip() != normalized_sender:
             continue
-        if c.sender_contains and c.sender_contains.lower() not in normalized_sender:
+        if c.sender_contains and str(c.sender_contains).lower().strip() not in normalized_sender:
             continue
         if c.filename_regex and pattern and not pattern.search(filename):
             continue
-        if c.media_type and c.media_type != media_type:
+        if c.media_type and str(c.media_type).lower().strip() != normalized_media:
             continue
-        if c.source_group and c.source_group != source_group:
+        if c.source_group and str(c.source_group).lower().strip() != normalized_group:
             continue
         if c.file_size_gt is not None and file_size <= c.file_size_gt:
             continue
@@ -145,5 +173,4 @@ def evaluate_rules(
 def move_to_folder(filepath: Path, folder: str) -> Path:
     """Generate new path inside target folder, preserving filename."""
     target_dir = Path(folder) / filepath.parent.name
-    target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir / filepath.name

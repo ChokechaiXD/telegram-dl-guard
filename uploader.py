@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
+import random
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -14,10 +16,16 @@ from typing import Any
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telethon.tl.types import InputMediaUploadedPhoto, InputMediaUploadedDocument
+from telethon.tl.types import (
+    InputMediaUploadedPhoto,
+    InputMediaUploadedDocument,
+    DocumentAttributeFilename,
+    DocumentAttributeVideo,
+)
 
-from upload_tracker import is_uploaded, mark_uploaded, mark_pending
-from utils import format_bytes
+from core.state import is_uploaded, mark_uploaded, mark_pending, ACTIVE_UPLOADS, GLOBAL_STATUS
+from core.download_handler import _file_hash, _file_hash_async
+from core.utils import format_bytes
 
 log = logging.getLogger("guard.uploader")
 
@@ -25,6 +33,106 @@ ALBUM_SIZE = 10
 BATCH_DELAY = 1.0
 ALBUM_GAP = 2.0
 FLUSH_TIMEOUT = 60
+
+
+def _parse_date(date_str: str | None) -> datetime:
+    if not date_str:
+        return datetime.now()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(date_str)
+    except Exception:
+        return datetime.now()
+
+
+_webhook_queue: asyncio.Queue = asyncio.Queue()
+_webhook_task: asyncio.Task | None = None
+
+
+def _send_webhook_sync(url: str, payload: dict) -> None:
+    import urllib.request
+    import urllib.error
+    import json
+    import time
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "Telegram-DL-Guard"},
+            method="POST"
+        )
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    response.read()
+                    return
+            except urllib.error.HTTPError as he:
+                if he.code == 429:
+                    retry_after = he.headers.get("Retry-After")
+                    wait_time = int(retry_after) if (retry_after and retry_after.isdigit()) else (2 ** attempt * 5)
+                    log.warning(f"Webhook rate limited (HTTP 429). Retrying after {wait_time}s...")
+                    time.sleep(wait_time)
+                elif he.code >= 500:
+                    wait_time = 2 ** attempt * 2
+                    log.warning(f"Webhook error (HTTP {he.code}). Retrying after {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    log.error(f"Webhook failed with terminal HTTP error {he.code}")
+                    break
+            except Exception as ex:
+                wait_time = 2 ** attempt * 2
+                log.warning(f"Webhook network error: {ex}. Retrying after {wait_time}s...")
+                time.sleep(wait_time)
+    except Exception as ex:
+        log.error(f"Webhook initialization failed: {ex}")
+
+
+async def _webhook_dispatcher() -> None:
+    while True:
+        try:
+            url, payload = await _webhook_queue.get()
+            await asyncio.to_thread(_send_webhook_sync, url, payload)
+            _webhook_queue.task_done()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.error("Error in webhook dispatcher: %s", e)
+
+
+async def dispatch_webhook_notification(filename: str, file_size: int, sender: str, group: str, caption: str) -> None:
+    global _webhook_task
+    from config import AppConfig
+    cfg = AppConfig.load()
+    if not cfg.webhook_enabled or not cfg.webhook_url:
+        return
+    
+    if _webhook_task is None or _webhook_task.done():
+        _webhook_task = asyncio.create_task(_webhook_dispatcher())
+        
+    from core.utils import format_bytes
+    size_str = format_bytes(file_size) if file_size > 0 else "Unknown"
+    
+    payload = {
+        "embeds": [
+            {
+                "title": "📥 New File Uploaded to Storage",
+                "color": 5814783,
+                "fields": [
+                    {"name": "📁 Filename", "value": filename[:100] or "unknown", "inline": True},
+                    {"name": "📦 Size", "value": size_str, "inline": True},
+                    {"name": "👤 Sender", "value": sender or "unknown", "inline": True},
+                    {"name": "📌 Source", "value": group or "unknown", "inline": True}
+                ],
+                "description": caption[:300] if caption else "No description",
+                "timestamp": datetime.now().isoformat()
+            }
+        ]
+    }
+    _webhook_queue.put_nowait((cfg.webhook_url, payload))
 
 
 # ── Caption ────────────────────────────────────────────────────
@@ -50,7 +158,9 @@ def build_caption(
     import re
 
     def _tag(text: str) -> str:
-        return re.sub(r"[^\w\u0E00-\u0E7F\-]", " ", text).strip()
+        t = re.sub(r"[^\w\u0E00-\u0E7F\-]", "_", text).strip()
+        t = re.sub(r"_+", "_", t)
+        return t.strip("_")
 
     date_str = dt.strftime("%Y-%m-%d %H:%M")
     lines: list[str] = []
@@ -63,12 +173,25 @@ def build_caption(
             tags.append(f"#{g}")
     s = _tag(sender_name)
     if s:
-        tags.append(s)
+        tags.append(f"#{s}")
+    if original_caption:
+        for word in original_caption.split():
+            if word.startswith("#") and len(word) > 1:
+                cleaned_tag = _tag(word[1:])
+                if cleaned_tag:
+                    formatted_tag = f"#{cleaned_tag}"
+                    if formatted_tag not in tags:
+                        tags.append(formatted_tag)
     if tags:
         lines.append(" ".join(tags))
 
     # Detail lines
-    lines.append(f"👤 {sender_name}")
+    sender_clean = sender_name.replace(" ", "_")
+    sender_clean = re.sub(r"[^\w\u0E00-\u0E7F\-]", "", sender_clean)
+    if sender_clean:
+        lines.append(f"👤 #{sender_clean}")
+    else:
+        lines.append(f"👤 #{sender_name}")
     if sender_username:
         lines.append(f"💬 @{sender_username}")
     if for_album:
@@ -92,14 +215,53 @@ def build_caption(
 
 # ── Media type ─────────────────────────────────────────────────
 
+_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".3gp"}
+_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+
 
 def _detect_send_type(filepath: Path) -> str:
     ext = filepath.suffix.lower()
-    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}:
+    if ext in _PHOTO_EXTS:
         return "photo"
-    if ext in {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".3gp"}:
+    if ext in _VIDEO_EXTS:
         return "video"
     return "document"
+
+
+def _guess_mime(filepath: Path) -> str:
+    """Return a proper MIME type for the file based on its extension."""
+    mime, _ = mimetypes.guess_type(filepath.name)
+    if mime:
+        return mime
+    ext = filepath.suffix.lower()
+    fallback = {
+        ".mp4": "video/mp4", ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo", ".mov": "video/quicktime",
+        ".webm": "video/webm", ".flv": "video/x-flv",
+        ".wmv": "video/x-ms-wmv", ".m4v": "video/x-m4v",
+        ".3gp": "video/3gpp",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".gif": "image/gif",
+        ".webp": "image/webp", ".bmp": "image/bmp",
+        ".pdf": "application/pdf", ".zip": "application/zip",
+        ".rar": "application/x-rar-compressed",
+    }
+    return fallback.get(ext, "application/octet-stream")
+
+
+def _build_doc_attributes(filepath: Path, send_type: str) -> list:
+    """Build Telethon document attributes so Telegram can identify the file."""
+    attrs = [DocumentAttributeFilename(file_name=filepath.name)]
+    if send_type == "video":
+        # Provide basic video attribute; Telegram will fill in real
+        # dimensions from the actual stream when it processes the file.
+        attrs.append(DocumentAttributeVideo(
+            duration=0,
+            w=1920,
+            h=1080,
+            supports_streaming=True,
+        ))
+    return attrs
 
 
 # ── Upload single ──────────────────────────────────────────────
@@ -118,7 +280,7 @@ async def upload_single(
     stype = send_type or _detect_send_type(filepath)
     log.info("upload_single: %s (%s)", filepath.name, stype)
 
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             kwargs: dict[str, Any] = {"file": str(filepath)}
             if caption:
@@ -127,19 +289,22 @@ async def upload_single(
                 kwargs["reply_to"] = reply_to
             if stype == "video":
                 kwargs["supports_streaming"] = True
+                kwargs["attributes"] = _build_doc_attributes(filepath, "video")
+                kwargs["mime_type"] = _guess_mime(filepath)
             elif stype != "photo":
                 kwargs["force_document"] = True
+                kwargs["attributes"] = [DocumentAttributeFilename(file_name=filepath.name)]
+                kwargs["mime_type"] = _guess_mime(filepath)
             msg = await client.send_file(storage_group_id, **kwargs)
             return msg.id
         except FloodWaitError as e:
-            await asyncio.sleep(e.seconds)
-            if attempt == 2:
-                return None
+            wait = e.seconds + random.uniform(0.5, 2.0)
+            log.warning("FloodWait %ds (+jitter), attempt %d/4", e.seconds, attempt + 1)
+            await asyncio.sleep(wait)
         except Exception as e:
-            log.error("upload_single: %s", e)
-            await asyncio.sleep(2 * (attempt + 1))
-            if attempt == 2:
-                return None
+            backoff = min(2 ** attempt + random.uniform(0, 1), 30)
+            log.error("upload_single attempt %d/4: %s (backoff %.1fs)", attempt + 1, e, backoff)
+            await asyncio.sleep(backoff)
     return None
 
 
@@ -167,7 +332,13 @@ async def upload_album(
             if stype == "photo":
                 media_list.append(InputMediaUploadedPhoto(file=file_obj))
             else:
-                media_list.append(InputMediaUploadedDocument(file=file_obj, mime_type="application/octet-stream", attributes=[]))
+                mime = _guess_mime(fpath)
+                attrs = _build_doc_attributes(fpath, stype)
+                media_list.append(InputMediaUploadedDocument(
+                    file=file_obj,
+                    mime_type=mime,
+                    attributes=attrs,
+                ))
 
         if not media_list:
             continue
@@ -202,27 +373,54 @@ async def upload_worker(
     storage_group_id: int,
     queue: asyncio.Queue,
     mode: str = "realtime_keep",
+    num_workers: int = 3,
 ) -> None:
-    """Smart Mode upload worker. Queue item: (fp, sender, username, dt, group, caption, album_group)."""
-    log.info("upload_worker: Smart Mode (mode=%s)", mode)
+    """Smart Mode upload worker with parallel upload slots.
+    
+    Queue items are (priority, seq, payload) tuples from PriorityQueue.
+    payload = (fp, sender, username, dt, group, caption, album_group)
+    """
+    log.info("upload_worker: Smart Mode (mode=%s, workers=%d)", mode, num_workers)
     do_delete = mode.endswith("_delete")
+    ul_sem = asyncio.Semaphore(max(1, min(num_workers, 5)))
     buffer: list[tuple] = []
 
     async def _send_single(item: tuple) -> int | None:
         fpath_str, sender, username, dt, grp, caption, _ag = item
         fpath = Path(fpath_str)
         if not fpath.exists() or is_uploaded(fpath_str):
+            ACTIVE_UPLOADS.discard(fpath_str)
             return None
-        file_size = fpath.stat().st_size if fpath.exists() else 0
+        file_size = fpath.stat().st_size
         cap = build_caption(sender, username, dt, fpath.name, grp, file_size, caption)
-        msg_id = await upload_single(client, storage_group_id, fpath, cap)
-        if msg_id:
-            mark_uploaded(fpath_str, msg_id)
-            if do_delete and fpath.exists():
-                fpath.unlink()
-        else:
-            mark_pending(fpath_str)
-        return msg_id
+        log.info(f"Uploading: {fpath.name}")
+        
+        fh = await _file_hash_async(fpath)
+        
+        try:
+            msg_id = await upload_single(client, storage_group_id, fpath, cap)
+            if msg_id:
+                mark_uploaded(fpath_str, msg_id, file_hash=fh)
+                await dispatch_webhook_notification(fpath.name, file_size, sender, grp, caption)
+                log.info(f"Uploaded: {fpath.name}")
+                # Increment actual upload counter
+                GLOBAL_STATUS["today_uploaded"] += 1
+                if do_delete and fpath.exists():
+                    try:
+                        fpath.unlink()
+                    except Exception as ex:
+                        log.warning("Failed to delete local file %s after upload: %s", fpath, ex)
+            else:
+                mark_pending(fpath_str)
+                log.error(f"Upload failed: {fpath.name}")
+            return msg_id
+        finally:
+            ACTIVE_UPLOADS.discard(fpath_str)
+
+    async def _send_single_guarded(item: tuple) -> int | None:
+        """Upload with concurrency limiter."""
+        async with ul_sem:
+            return await _send_single(item)
 
     async def _send_album(album_items: list[tuple]) -> int | None:
         if not album_items:
@@ -231,6 +429,7 @@ async def upload_worker(
         for item in album_items:
             fpath = Path(item[0])
             if not fpath.exists() or is_uploaded(item[0]):
+                ACTIVE_UPLOADS.discard(item[0])
                 continue
             media_items.append((fpath, _detect_send_type(fpath), item))
 
@@ -240,19 +439,45 @@ async def upload_worker(
         first = album_items[0]
         album_cap = build_caption(first[1], first[2], first[3], "", first[4], 0, first[5], file_total=len(media_items), for_album=True)
         pairs = [(fp, st) for fp, st, _ in media_items]
-        msg_id = await upload_album(client, storage_group_id, pairs, album_cap)
+        
+        log.info(f"Uploading album: {len(media_items)} items from {first[1]}")
+        try:
+            msg_id = await upload_album(client, storage_group_id, pairs, album_cap)
 
-        for _, _, item in media_items:
-            fpath_str = item[0]
-            if msg_id:
-                mark_uploaded(fpath_str, msg_id)
-                if do_delete:
+            total_album_size = 0
+            for _, _, item in media_items:
+                fpath_str = item[0]
+                if msg_id:
                     p = Path(fpath_str)
-                    if p.exists():
-                        p.unlink()
+                    total_album_size += p.stat().st_size if p.exists() else 0
+                    fh = await _file_hash_async(p) if p.exists() else None
+                    mark_uploaded(fpath_str, msg_id, file_hash=fh)
+                    if do_delete:
+                        p = Path(fpath_str)
+                        try:
+                            if p.exists():
+                                p.unlink()
+                        except Exception as ex:
+                            log.warning("Failed to delete local file %s after upload: %s", p, ex)
+                else:
+                    mark_pending(fpath_str)
+            
+            if msg_id:
+                first_fp = Path(first[0])
+                await dispatch_webhook_notification(
+                    f"Album: {len(media_items)} files (First: {first_fp.name})",
+                    total_album_size, first[1], first[4], first[5]
+                )
+            
+            if msg_id:
+                log.info(f"Uploaded album successfully: {len(media_items)} items")
+                GLOBAL_STATUS["today_uploaded"] += len(media_items)
             else:
-                mark_pending(fpath_str)
-        return msg_id
+                log.error(f"Upload album failed: {len(media_items)} items")
+            return msg_id
+        finally:
+            for _, _, item in media_items:
+                ACTIVE_UPLOADS.discard(item[0])
 
     async def _flush() -> None:
         nonlocal buffer
@@ -272,9 +497,14 @@ async def upload_worker(
         for ag_items in albums.values():
             await _send_album(ag_items)
             await asyncio.sleep(ALBUM_GAP)
-        for item in singles:
-            await _send_single(item)
-            await asyncio.sleep(BATCH_DELAY)
+
+        # Parallel upload for singles via gather + semaphore
+        if singles:
+            upload_tasks = [_send_single_guarded(item) for item in singles]
+            results = await asyncio.gather(*upload_tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, Exception):
+                    log.error("Parallel upload error: %s", r)
 
     is_batch = mode.startswith("batch")
 
@@ -282,17 +512,28 @@ async def upload_worker(
         try:
             timeout = FLUSH_TIMEOUT if is_batch else 5.0
             try:
-                item = await asyncio.wait_for(queue.get(), timeout=timeout)
+                raw_item = await asyncio.wait_for(queue.get(), timeout=timeout)
             except asyncio.TimeoutError:
                 if buffer:
                     await _flush()
                 continue
 
-            if item is None:
-                if buffer:
-                    await _flush()
-                queue.task_done()
-                break
+            # Unpack PriorityQueue tuple: (priority_key, seq, payload)
+            if isinstance(raw_item, tuple) and len(raw_item) == 3:
+                _, _, item = raw_item
+                if item is None:
+                    # Sentinel — shutdown signal
+                    if buffer:
+                        await _flush()
+                    queue.task_done()
+                    break
+            else:
+                item = raw_item  # backward compat with plain Queue
+                if item is None:
+                    if buffer:
+                        await _flush()
+                    queue.task_done()
+                    break
 
             buffer.append(item)
             queue.task_done()
@@ -382,13 +623,16 @@ async def _upload_one(client, storage_group_id, bf, on_progress, current, total)
             on_progress(current + 1, total, filename, "skipped")
         return None
 
-    dt = datetime.strptime(bf.get("date", "2026-01-01 00:00"), "%Y-%m-%d %H:%M") if bf.get("date") else datetime.now()
+    dt = _parse_date(bf.get("date"))
     file_size = filepath.stat().st_size if filepath.exists() else 0
     cap = build_caption(bf.get("sender_name", "unknown"), bf.get("sender_username"), dt, filename, bf.get("source_group_name", ""), file_size, bf.get("original_caption", ""))
 
+    fh = await _file_hash_async(filepath) if filepath.exists() else None
+    
     msg_id = await upload_single(client, storage_group_id, filepath, cap)
     if msg_id:
-        mark_uploaded(bf["filepath"], msg_id)
+        mark_uploaded(bf["filepath"], msg_id, file_hash=fh)
+        await dispatch_webhook_notification(filename, file_size, bf.get("sender_name", "unknown"), bf.get("source_group_name", ""), bf.get("original_caption", ""))
         if on_progress:
             on_progress(current + 1, total, filename, "ok")
         return file_size
@@ -411,15 +655,19 @@ async def _upload_album_batch(client, storage_group_id, files, on_progress, base
         return {"success": 0, "failed": 0, "total_size": 0}
 
     first_bf = media_items[0][3]
-    dt = datetime.strptime(first_bf.get("date", "2026-01-01 00:00"), "%Y-%m-%d %H:%M") if first_bf.get("date") else datetime.now()
+    dt = _parse_date(first_bf.get("date"))
     album_cap = build_caption(first_bf.get("sender_name", "unknown"), first_bf.get("sender_username"), dt, "", first_bf.get("source_group_name", ""), 0, first_bf.get("original_caption", ""), file_total=len(media_items), for_album=True)
 
     pairs = [(fp, st) for fp, _, st, _ in media_items]
     msg_id = await upload_album(client, storage_group_id, pairs, album_cap)
 
+    total_album_size = 0
     for i, (_, fpath_str, _, bf) in enumerate(media_items):
         if msg_id:
-            mark_uploaded(fpath_str, msg_id)
+            p = Path(fpath_str)
+            total_album_size += p.stat().st_size if p.exists() else 0
+            fh = await _file_hash_async(p) if p.exists() else None
+            mark_uploaded(fpath_str, msg_id, file_hash=fh)
             sz = Path(fpath_str).stat().st_size if Path(fpath_str).exists() else 0
             total_size += sz
             success += 1
@@ -430,5 +678,11 @@ async def _upload_album_batch(client, storage_group_id, files, on_progress, base
             failed += 1
             if on_progress:
                 on_progress(base_count + i + 1, total, bf.get("filename", "?"), "failed")
+
+    if msg_id:
+        await dispatch_webhook_notification(
+            f"Batch Album: {len(media_items)} files",
+            total_album_size, first_bf.get("sender_name", "unknown"), first_bf.get("source_group_name", ""), first_bf.get("original_caption", "")
+        )
 
     return {"success": success, "failed": failed, "total_size": total_size}

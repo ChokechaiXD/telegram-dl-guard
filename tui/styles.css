@@ -1,0 +1,182 @@
+Screen {
+    background: #090b0f;
+}
+
+#dashboard-container {
+    height: 1fr;
+    display: block;
+}
+
+#settings-container {
+    height: 1fr;
+    display: none;
+    padding: 1 2;
+}
+
+#gallery-container {
+    height: 1fr;
+    display: none;
+    padding: 1 2;
+    layout: horizontal;
+}
+
+#gallery-left {
+    width: 40%;
+    height: 1fr;
+    border: solid #1f2937;
+    background: #11151c;
+    padding: 1;
+}
+
+#gallery-right {
+    width: 60%;
+    height: 1fr;
+    padding-left: 2;
+}
+
+#main-layout {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#left-panel {
+    width: 38%;
+    height: 1fr;
+    padding: 0 1;
+}
+
+#right-panel {
+    width: 62%;
+    height: 1fr;
+    padding: 0 1;
+}
+
+.card {
+    background: #11151c;
+    border: solid #1f2937;
+    padding: 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.card-title {
+    color: #58a6ff;
+    text-style: bold;
+    margin-bottom: 1;
+    border-bottom: solid #1f2937;
+    padding-bottom: 1;
+    width: 100%;
+}
+
+#status-text, #stats-text {
+    height: auto;
+    color: #c9d1d9;
+}
+
+#progress-panel {
+    background: #11151c;
+    border: solid #21262d;
+    padding: 1;
+    margin-bottom: 1;
+    height: auto;
+    display: none;
+}
+
+.controls-grid {
+    height: auto;
+    margin-top: 1;
+}
+
+.controls-row {
+    height: auto;
+    align: center middle;
+}
+
+.controls-row Button {
+    width: 14;
+    margin: 0 1;
+}
+
+#log-panel {
+    background: #07090e;
+    border: solid #1f2937;
+    height: 1fr;
+    color: #c9d1d9;
+}
+
+.settings-group {
+    background: #11151c;
+    border: solid #1f2937;
+    padding: 1 2;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.setting-row {
+    height: auto;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+.setting-row Label {
+    width: 28;
+    color: #8b949e;
+}
+
+.setting-row Input {
+    width: 50%;
+    background: #090b0f;
+    border: solid #1f2937;
+}
+
+.setting-row Select {
+    width: 50%;
+    background: #090b0f;
+    border: solid #1f2937;
+}
+
+.setting-row Switch {
+    margin-left: 1;
+}
+
+.settings-actions {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+    margin-bottom: 2;
+}
+
+.settings-actions Button {
+    margin: 0 2;
+    width: 22;
+}
+
+#media-tree {
+    height: 1fr;
+    background: #090b0f;
+    color: #c9d1d9;
+    border: solid #1f2937;
+}
+
+#btn-sync-groups {
+    width: 18;
+    margin-left: 1;
+}
+
+.download-row {
+    height: auto;
+    align: left middle;
+    margin-bottom: 1;
+    border-bottom: solid #1f2937;
+    padding-bottom: 1;
+}
+
+.dl-info {
+    width: 78%;
+    color: #c9d1d9;
+}
+
+.btn-dl-cancel {
+    width: 14;
+    margin-left: 2;
+}
