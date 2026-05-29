@@ -1,16 +1,27 @@
-MIT License
+Non-Commercial Personal Use License
 
-Copyright (c) 2026
+Copyright (c) 2026 Chokechai
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+of this software and associated documentation files (the "Software"), to use,
+copy, and modify the Software for personal, non-commercial, and educational
+purposes only, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. COMMERCIAL USE PROHIBITED:
+The Software, in whole or in part, or any derivative works thereof, may NOT
+be sold, rented, leased, licensed, sublicensed, or otherwise distributed or
+used for any commercial purposes, monetization, or financial gain. This
+includes, but is not limited to, charging fees for access, selling compiled
+binaries, bundling with paid software, or using the Software as a paid service.
+
+2. LICENSE RETENTION:
+The above copyright notice, this permission notice, and all disclaimers must
+be included in all copies or substantial portions of the Software.
+
+3. FREE REDISTRIBUTION REQUIREMENT:
+Any redistribution of the Software, modified or unmodified, must remain
+completely free of charge, non-commercial, and licensed under these identical
+terms.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
