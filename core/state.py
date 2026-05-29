@@ -653,3 +653,91 @@ def purge_old_records(msg_days: int = 7, tracker_days: int = 30) -> dict:
             log.error("purge_old_records failed: %s", e)
 
     return purged
+
+
+def get_mime_type_stats() -> dict[str, int]:
+    """Calculate file count metrics grouped by MIME-type categories using optimized SQL queries."""
+    global _conn
+    stats = {"photo": 0, "video": 0, "doc": 0, "other": 0}
+    with _db_lock:
+        try:
+            # Fetch categories using efficient SQL COUNT with conditional SUM CASE matching
+            cursor = _conn.execute("""
+                SELECT
+                    SUM(CASE WHEN 
+                        filename LIKE '%.jpg' OR filename LIKE '%.jpeg' OR filename LIKE '%.png' OR 
+                        filename LIKE '%.webp' OR filename LIKE '%.bmp' OR filename LIKE '%.gif' 
+                        THEN 1 ELSE 0 END) as photo,
+                    SUM(CASE WHEN 
+                        filename LIKE '%.mp4' OR filename LIKE '%.mov' OR filename LIKE '%.avi' OR 
+                        filename LIKE '%.mkv' OR filename LIKE '%.webm' OR filename LIKE '%.3gp' 
+                        THEN 1 ELSE 0 END) as video,
+                    SUM(CASE WHEN 
+                        filename LIKE '%.pdf' OR filename LIKE '%.txt' OR filename LIKE '%.doc' OR 
+                        filename LIKE '%.docx' OR filename LIKE '%.zip' OR filename LIKE '%.rar' OR 
+                        filename LIKE '%.7z' OR filename LIKE '%.tar' OR filename LIKE '%.gz' 
+                        THEN 1 ELSE 0 END) as doc,
+                    COUNT(*) as total
+                FROM download_tracker
+            """)
+            row = cursor.fetchone()
+            if row:
+                p, v, d, tot = row
+                stats["photo"] = p or 0
+                stats["video"] = v or 0
+                stats["doc"] = d or 0
+                stats["other"] = max(0, (tot or 0) - stats["photo"] - stats["video"] - stats["doc"])
+        except Exception as e:
+            log.error("Failed to query MIME stats: %s", e)
+    return stats
+
+
+def get_daily_stats_last_7_days() -> list[tuple[str, int, int]]:
+    """Return historical volume metrics (date, count, size_bytes) for the last week, optimized by range filtering."""
+    global _conn
+    results = []
+    from datetime import date, timedelta
+    dates = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    stats = {d: {"count": 0, "bytes": 0} for d in dates}
+    with _db_lock:
+        try:
+            # Filter by uploaded_at date range to scan only the last week's rows, highly indexing-friendly
+            start_date = f"{dates[0]} 00:00:00"
+            cursor = _conn.execute("""
+                SELECT SUBSTR(uploaded_at, 1, 10) as day, COUNT(*), SUM(size) 
+                FROM download_tracker 
+                WHERE uploaded_at >= ? 
+                GROUP BY day
+            """, (start_date,))
+            for row in cursor.fetchall():
+                day, count, size_bytes = row
+                if day in stats:
+                    stats[day] = {"count": count, "bytes": size_bytes or 0}
+        except Exception as e:
+            log.error("Failed to query daily stats: %s", e)
+    for d in dates:
+        results.append((d, stats[d]["count"], stats[d]["bytes"]))
+    return results
+
+
+def get_system_ratio_stats() -> dict[str, int]:
+    """Return total ratio analysis stats of downloaded vs uploaded items."""
+    global _conn
+    stats = {"total": 0, "uploaded": 0, "pending": 0}
+    with _db_lock:
+        try:
+            cursor = _conn.execute("""
+                SELECT 
+                    COUNT(*),
+                    SUM(CASE WHEN uploaded = 1 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN uploaded = 0 THEN 1 ELSE 0 END)
+                FROM download_tracker
+            """)
+            row = cursor.fetchone()
+            if row:
+                stats["total"] = row[0] or 0
+                stats["uploaded"] = row[1] or 0
+                stats["pending"] = row[2] or 0
+        except Exception as e:
+            log.error("Failed to query ratio stats: %s", e)
+    return stats

@@ -174,3 +174,51 @@ def move_to_folder(filepath: Path, folder: str) -> Path:
     """Generate new path inside target folder, preserving filename."""
     target_dir = Path(folder) / filepath.parent.name
     return target_dir / filepath.name
+
+
+def save_rules_to_yaml(rules: list[Rule], path: Path | None = None) -> None:
+    """Serialize list of Rule dataclass items and write back to YAML file."""
+    p = path or _RULES_FILE
+    data = {"rules": []}
+    for r in rules:
+        rule_dict = {
+            "name": r.name,
+            "enabled": r.enabled,
+            "when": {},
+            "action": {}
+        }
+        
+        # Condition (when)
+        c = r.condition
+        if c.sender:
+            rule_dict["when"]["sender"] = c.sender
+        if c.sender_contains:
+            rule_dict["when"]["sender_contains"] = c.sender_contains
+        if c.filename_regex:
+            rule_dict["when"]["filename_regex"] = c.filename_regex
+        if c.media_type:
+            rule_dict["when"]["media_type"] = c.media_type
+        if c.file_size_gt is not None:
+            rule_dict["when"]["file_size_gt"] = c.file_size_gt
+        if c.file_size_lt is not None:
+            rule_dict["when"]["file_size_lt"] = c.file_size_lt
+        if c.source_group:
+            rule_dict["when"]["source_group"] = c.source_group
+            
+        # Action
+        a = r.action
+        if a.skip:
+            rule_dict["action"]["skip"] = True
+        if a.tag:
+            rule_dict["action"]["tag"] = a.tag
+        if a.album:
+            rule_dict["action"]["album"] = True
+        if a.priority:
+            rule_dict["action"]["priority"] = True
+        if a.move_to:
+            rule_dict["action"]["move_to"] = a.move_to
+            
+        data["rules"].append(rule_dict)
+        
+    with open(p, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)

@@ -19,7 +19,7 @@ from dotenv import set_key
 from core.state import GLOBAL_STATUS, ACTIVE_DOWNLOADS
 from core.utils import format_bytes
 
-from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer
+from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, RulesBuilderContainer
 
 class GuardApp(App):
     """Telegram DL Guard — Interactive TUI with dynamic dashboard, gallery, and setup."""
@@ -34,6 +34,8 @@ class GuardApp(App):
         Binding("r", "cmd_restart", "Restart"),
         Binding("c", "cmd_config", "Toggle Settings"),
         Binding("g", "cmd_gallery", "Toggle Media Gallery"),
+        Binding("a", "cmd_analytics", "Toggle Analytics"),
+        Binding("l", "cmd_rules", "Toggle Rules Manager"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -42,6 +44,8 @@ class GuardApp(App):
         yield DashboardContainer(id="dashboard-container")
         yield SettingsContainer(id="settings-container")
         yield GalleryContainer(id="gallery-container")
+        yield AnalyticsContainer(id="analytics-container")
+        yield RulesBuilderContainer(id="rules-container")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -49,6 +53,8 @@ class GuardApp(App):
         self.query_one("#dashboard-container").styles.display = "block"
         self.query_one("#settings-container").styles.display = "none"
         self.query_one("#gallery-container").styles.display = "none"
+        self.query_one("#analytics-container").styles.display = "none"
+        self.query_one("#rules-container").styles.display = "none"
 
         # Bind log callback
         import core.state as cs
@@ -68,6 +74,13 @@ class GuardApp(App):
         self._prog_box = self.query_one("#active-downloads-box")
         self._log_panel = self.query_one("#log-panel", RichLog)
 
+        # Analytics speed sliding logs
+        self._recent_speed_history: list[float] = []
+
+        # Rule Editor attributes
+        self._rules_list: list = []
+        self._editing_rule_index: int | None = None
+
         # Dirty-check state
         self._last_status = ""
         self._last_stats = ""
@@ -76,6 +89,9 @@ class GuardApp(App):
 
         self._refresh_dashboard()
         self.set_interval(2, self._refresh_dashboard)
+
+        # Populate rules.yaml into GUI builder
+        self.load_rules_to_ui()
 
         # Background thread properties
         self._listener_thread = None
@@ -364,6 +380,261 @@ class GuardApp(App):
             settings.styles.display = "none"
             dash.styles.display = "block"
             self.title = "Telegram DL Guard Dashboard"
+
+    def toggle_analytics(self) -> None:
+        dash = self.query_one("#dashboard-container")
+        settings = self.query_one("#settings-container")
+        gallery = self.query_one("#gallery-container")
+        analytics = self.query_one("#analytics-container")
+        rules = self.query_one("#rules-container")
+        
+        if dash.styles.display == "block":
+            dash.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            rules.styles.display = "none"
+            analytics.styles.display = "block"
+            self.title = "Telegram DL Guard Visual Analytics"
+            asyncio.create_task(self.refresh_analytics_screen())
+        else:
+            analytics.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            rules.styles.display = "none"
+            dash.styles.display = "block"
+            self.title = "Telegram DL Guard Dashboard"
+
+    def toggle_rules(self) -> None:
+        dash = self.query_one("#dashboard-container")
+        settings = self.query_one("#settings-container")
+        gallery = self.query_one("#gallery-container")
+        analytics = self.query_one("#analytics-container")
+        rules = self.query_one("#rules-container")
+        
+        if dash.styles.display == "block":
+            dash.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            analytics.styles.display = "none"
+            rules.styles.display = "block"
+            self.title = "Telegram DL Guard Rule Builder"
+            self.load_rules_to_ui()
+        else:
+            rules.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            analytics.styles.display = "none"
+            dash.styles.display = "block"
+            self.title = "Telegram DL Guard Dashboard"
+
+    def load_rules_to_ui(self) -> None:
+        try:
+            from core.rules import load_rules
+            self._rules_list = load_rules()
+            self.render_rules_list()
+        except Exception as ex:
+            self.notify(f"Failed to load rules: {ex}", severity="error")
+
+    def render_rules_list(self) -> None:
+        try:
+            box = self.query_one("#rules-list-box")
+            box.remove_children()
+            
+            if not self._rules_list:
+                box.mount(Static("\n[dim]No rules found. Construct one using the editor on the right![/]\n", id="empty-rules-label"))
+                return
+                
+            for idx, r in enumerate(self._rules_list):
+                status_text = "Enabled" if r.enabled else "Disabled"
+                
+                conds = []
+                c = r.condition
+                if c.media_type: conds.append(f"media={c.media_type}")
+                if c.sender: conds.append(f"sender={c.sender}")
+                if c.sender_contains: conds.append(f"contains={c.sender_contains}")
+                if c.filename_regex: conds.append(f"regex={c.filename_regex}")
+                if c.file_size_gt is not None: conds.append(f"size>{c.file_size_gt//1024}KB")
+                if c.file_size_lt is not None: conds.append(f"size<{c.file_size_lt//1024}KB")
+                if c.source_group: conds.append(f"group={c.source_group}")
+                
+                acts = []
+                a = r.action
+                if a.skip: acts.append("SKIP")
+                if a.priority: acts.append("PRIORITY")
+                if a.tag: acts.append(f"tag={a.tag}")
+                if a.move_to: acts.append(f"move={a.move_to}")
+                if a.album: acts.append("album")
+                
+                cond_str = ", ".join(conds) or "Any"
+                act_str = ", ".join(acts) or "None"
+                
+                card_content = (
+                    f"[bold cyan]{idx + 1}. {r.name}[/] [dim]({status_text})[/]\n"
+                    f"[dim]WHEN:[/] {cond_str} ──> [bold yellow]THEN:[/] {act_str}"
+                )
+                
+                card_text = Static(card_content, classes="rule-card-info")
+                btn_up = Button("▲", variant="default", id=f"rule-up-{idx}", classes="btn-rule-arrow")
+                btn_down = Button("▼", variant="default", id=f"rule-down-{idx}", classes="btn-rule-arrow")
+                btn_edit = Button("Edit", variant="primary", id=f"rule-edit-{idx}", classes="btn-rule-action")
+                btn_del = Button("Del", variant="error", id=f"rule-del-{idx}", classes="btn-rule-action")
+                
+                card_row = Horizontal(
+                    card_text, btn_up, btn_down, btn_edit, btn_del,
+                    classes="rule-card-row", id=f"rule-card-row-{idx}"
+                )
+                box.mount(card_row)
+        except Exception as e:
+            logging.getLogger("guard").error(f"Rule render error: {e}")
+
+    def edit_rule(self, idx: int) -> None:
+        try:
+            self._editing_rule_index = idx
+            rule = self._rules_list[idx]
+            
+            self.query_one("#rule-name", Input).value = rule.name
+            self.query_one("#rule-enabled", Switch).value = rule.enabled
+            
+            self.query_one("#rule-cond-media", Select).value = rule.condition.media_type or "any"
+            self.query_one("#rule-cond-sender", Input).value = rule.condition.sender or ""
+            self.query_one("#rule-cond-sender-contains", Input).value = rule.condition.sender_contains or ""
+            self.query_one("#rule-cond-regex", Input).value = rule.condition.filename_regex or ""
+            
+            if rule.condition.file_size_gt is not None:
+                self.query_one("#rule-cond-size-op", Select).value = "gt"
+                self.query_one("#rule-cond-size-val", Input).value = str(rule.condition.file_size_gt // 1024)
+            elif rule.condition.file_size_lt is not None:
+                self.query_one("#rule-cond-size-op", Select).value = "lt"
+                self.query_one("#rule-cond-size-val", Input).value = str(rule.condition.file_size_lt // 1024)
+            else:
+                self.query_one("#rule-cond-size-op", Select).value = "any"
+                self.query_one("#rule-cond-size-val", Input).value = ""
+                
+            self.query_one("#rule-cond-group", Input).value = rule.condition.source_group or ""
+            
+            self.query_one("#rule-act-skip", Switch).value = rule.action.skip
+            self.query_one("#rule-act-priority", Switch).value = rule.action.priority
+            self.query_one("#rule-act-tag", Input).value = rule.action.tag or ""
+            self.query_one("#rule-act-move", Input).value = rule.action.move_to or ""
+            self.query_one("#rule-act-album", Switch).value = rule.action.album
+            
+            self.notify(f"Loaded rule: {rule.name} for editing.")
+        except Exception as e:
+            self.notify(f"Failed to load rule details: {e}", severity="error")
+
+    def clear_rule_form(self) -> None:
+        self._editing_rule_index = None
+        self.query_one("#rule-name", Input).value = ""
+        self.query_one("#rule-enabled", Switch).value = True
+        self.query_one("#rule-cond-media", Select).value = "any"
+        self.query_one("#rule-cond-sender", Input).value = ""
+        self.query_one("#rule-cond-sender-contains", Input).value = ""
+        self.query_one("#rule-cond-regex", Input).value = ""
+        self.query_one("#rule-cond-size-op", Select).value = "any"
+        self.query_one("#rule-cond-size-val", Input).value = ""
+        self.query_one("#rule-cond-group", Input).value = ""
+        
+        self.query_one("#rule-act-skip", Switch).value = False
+        self.query_one("#rule-act-priority", Switch).value = False
+        self.query_one("#rule-act-tag", Input).value = ""
+        self.query_one("#rule-act-move", Input).value = ""
+        self.query_one("#rule-act-album", Switch).value = False
+
+    def save_rule_form(self) -> None:
+        name = self.query_one("#rule-name", Input).value.strip()
+        if not name:
+            self.notify("Rule name cannot be empty.", severity="error")
+            return
+            
+        enabled = self.query_one("#rule-enabled", Switch).value
+        
+        from core.rules import Rule, RuleCondition, RuleAction
+        
+        media = self.query_one("#rule-cond-media", Select).value
+        media_val = str(media).strip() if (media and str(media) != "Select.BLANK" and media != "any") else None
+        
+        sender = self.query_one("#rule-cond-sender", Input).value.strip() or None
+        sender_contains = self.query_one("#rule-cond-sender-contains", Input).value.strip() or None
+        regex = self.query_one("#rule-cond-regex", Input).value.strip() or None
+        
+        size_op = self.query_one("#rule-cond-size-op", Select).value
+        size_val_str = self.query_one("#rule-cond-size-val", Input).value.strip()
+        size_bytes = None
+        if size_val_str.isdigit():
+            size_bytes = int(size_val_str) * 1024
+            
+        size_gt = size_bytes if size_op == "gt" else None
+        size_lt = size_bytes if size_op == "lt" else None
+        
+        group = self.query_one("#rule-cond-group", Input).value.strip() or None
+        
+        cond = RuleCondition(
+            sender=sender,
+            sender_contains=sender_contains,
+            filename_regex=regex,
+            media_type=media_val,
+            file_size_gt=size_gt,
+            file_size_lt=size_lt,
+            source_group=group
+        )
+        
+        skip = self.query_one("#rule-act-skip", Switch).value
+        priority = self.query_one("#rule-act-priority", Switch).value
+        tag = self.query_one("#rule-act-tag", Input).value.strip() or None
+        move = self.query_one("#rule-act-move", Input).value.strip() or None
+        album = self.query_one("#rule-act-album", Switch).value
+        
+        act = RuleAction(
+            skip=skip,
+            tag=tag,
+            album=album,
+            priority=priority,
+            move_to=move
+        )
+        
+        new_rule = Rule(name=name, condition=cond, action=act, enabled=enabled)
+        
+        if self._editing_rule_index is None:
+            self._rules_list.append(new_rule)
+            self.notify(f"Added new rule: {name}")
+        else:
+            self._rules_list[self._editing_rule_index] = new_rule
+            self.notify(f"Updated rule: {name}")
+            self._editing_rule_index = None
+            
+        self.clear_rule_form()
+        self.render_rules_list()
+
+    def apply_rules_to_yaml(self) -> None:
+        try:
+            from core.rules import save_rules_to_yaml
+            save_rules_to_yaml(self._rules_list)
+            self.notify("Rules saved successfully! Restarting engine...", title="Rules Builder")
+            asyncio.create_task(self.restart_listener_engine())
+            self.toggle_rules()
+        except Exception as e:
+            self.notify(f"Failed to apply rules: {e}", severity="error", title="Rules Builder")
+
+    async def refresh_analytics_screen(self) -> None:
+        try:
+            import core.state as cs
+            from tui.screens.analytics import draw_speed_chart, draw_mime_distribution, draw_7day_volume_chart, draw_system_ratio_metrics
+            
+            mime_stats = await asyncio.to_thread(cs.get_mime_type_stats)
+            daily_stats = await asyncio.to_thread(cs.get_daily_stats_last_7_days)
+            ratio_stats = await asyncio.to_thread(cs.get_system_ratio_stats)
+            
+            speed_spark = draw_speed_chart(self._recent_speed_history)
+            mime_content = draw_mime_distribution(mime_stats)
+            volume_content = draw_7day_volume_chart(daily_stats)
+            ratio_content = draw_system_ratio_metrics(ratio_stats)
+            
+            self.query_one("#chart-speed-spark", Static).update(speed_spark)
+            self.query_one("#chart-mime-dist", Static).update(mime_content)
+            self.query_one("#chart-volume-history", Static).update(volume_content)
+            self.query_one("#chart-ratio-metrics", Static).update(ratio_content)
+        except Exception as e:
+            logging.getLogger("guard").error(f"Failed to refresh analytics screen: {e}")
 
     def load_config_to_ui(self) -> None:
         try:
@@ -843,6 +1114,33 @@ class GuardApp(App):
                     prog_box.remove_children()
                     self._prog_was_empty = True
             
+            # Calculate aggregate active download speed
+            curr_speed = 0.0
+            for msg_id, info in list(ACTIVE_DOWNLOADS.items()):
+                speed_str = info.get("speed", "0 B/s")
+                try:
+                    parts = speed_str.split()
+                    if len(parts) == 2:
+                        val = float(parts[0])
+                        unit = parts[1].lower()
+                        if "mb/s" in unit:
+                            curr_speed += val * 1_048_576
+                        elif "kb/s" in unit:
+                            curr_speed += val * 1024
+                        else:
+                            curr_speed += val
+                except Exception:
+                    pass
+            
+            self._recent_speed_history.append(curr_speed)
+            if len(self._recent_speed_history) > 30:
+                self._recent_speed_history.pop(0)
+                
+            # If the Visual Analytics tab is open, automatically refresh charts
+            analytics_screen = self.query_one("#analytics-container")
+            if analytics_screen.styles.display == "block":
+                asyncio.create_task(self.refresh_analytics_screen())
+            
         except Exception:
             self._status_widget.update("Status: [bold red]Stopped[/]\nUptime: 0h 0m\nUser Account: ?")
             self._stats_widget.update("Processed: 0 files\nToday Downloaded: 0\nToday Uploaded: 0\nToday Failed: 0\nToday Data Size: 0 B")
@@ -861,6 +1159,55 @@ class GuardApp(App):
                     self.notify("Task not found or already finished.", severity="error", title="Queue Controller")
             except (ValueError, IndexError):
                 self.notify("Invalid cancel target.", severity="error")
+            return
+
+        # Rule Builder Arrow Up Action
+        if btn_id and btn_id.startswith("rule-up-"):
+            try:
+                idx = int(btn_id.split("-")[-1])
+                if idx > 0:
+                    self._rules_list[idx], self._rules_list[idx - 1] = self._rules_list[idx - 1], self._rules_list[idx]
+                    self.render_rules_list()
+                    self.notify("Rule priority increased.")
+            except Exception as e:
+                self.notify(f"Error moving rule up: {e}", severity="error")
+            return
+
+        # Rule Builder Arrow Down Action
+        if btn_id and btn_id.startswith("rule-down-"):
+            try:
+                idx = int(btn_id.split("-")[-1])
+                if idx < len(self._rules_list) - 1:
+                    self._rules_list[idx], self._rules_list[idx + 1] = self._rules_list[idx + 1], self._rules_list[idx]
+                    self.render_rules_list()
+                    self.notify("Rule priority decreased.")
+            except Exception as e:
+                self.notify(f"Error moving rule down: {e}", severity="error")
+            return
+
+        # Rule Builder Edit Action
+        if btn_id and btn_id.startswith("rule-edit-"):
+            try:
+                idx = int(btn_id.split("-")[-1])
+                self.edit_rule(idx)
+            except Exception as e:
+                self.notify(f"Error editing rule: {e}", severity="error")
+            return
+
+        # Rule Builder Delete Action
+        if btn_id and btn_id.startswith("rule-del-"):
+            try:
+                idx = int(btn_id.split("-")[-1])
+                rule_name = self._rules_list[idx].name
+                del self._rules_list[idx]
+                if self._editing_rule_index == idx:
+                    self.clear_rule_form()
+                elif self._editing_rule_index is not None and self._editing_rule_index > idx:
+                    self._editing_rule_index -= 1
+                self.render_rules_list()
+                self.notify(f"Deleted rule: {rule_name}", severity="warning")
+            except Exception as e:
+                self.notify(f"Error deleting rule: {e}", severity="error")
             return
 
         if btn_id == "btn-start":
@@ -890,6 +1237,26 @@ class GuardApp(App):
             self.load_raw_file_to_ui()
         elif btn_id == "btn-save-raw-file":
             self.save_raw_file_from_ui()
+        elif btn_id == "btn-rule-new":
+            self.clear_rule_form()
+            self.notify("Form cleared. Input details for new rule.")
+        elif btn_id == "btn-rule-reload":
+            self.load_rules_to_ui()
+            self.notify("Reloaded rules from disk.")
+        elif btn_id == "btn-rule-save":
+            self.save_rule_form()
+        elif btn_id == "btn-rule-cancel":
+            self.clear_rule_form()
+            self.notify("Edit cancelled.")
+        elif btn_id == "btn-apply-rules-yaml":
+            self.apply_rules_to_yaml()
+        elif btn_id == "btn-refresh-analytics":
+            asyncio.create_task(self.refresh_analytics_screen())
+            self.notify("Refreshed system metrics.")
+        elif btn_id == "btn-back-rules":
+            self.toggle_rules()
+        elif btn_id == "btn-back-analytics":
+            self.toggle_analytics()
 
     def action_cmd_start(self) -> None:
         if not self.listener_task:
@@ -912,6 +1279,12 @@ class GuardApp(App):
 
     async def action_cmd_gallery(self) -> None:
         await self.toggle_gallery()
+
+    def action_cmd_analytics(self) -> None:
+        self.toggle_analytics()
+
+    def action_cmd_rules(self) -> None:
+        self.toggle_rules()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "setting-raw-file-select":
