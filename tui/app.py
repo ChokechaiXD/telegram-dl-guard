@@ -19,7 +19,7 @@ from dotenv import set_key
 from core.state import GLOBAL_STATUS, ACTIVE_DOWNLOADS
 from core.utils import format_bytes
 
-from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, RulesBuilderContainer
+from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, RulesBuilderContainer, SelectiveDownloaderContainer
 
 class GuardApp(App):
     """Telegram DL Guard — Interactive TUI with dynamic dashboard, gallery, and setup."""
@@ -36,6 +36,7 @@ class GuardApp(App):
         Binding("g", "cmd_gallery", "Toggle Media Gallery"),
         Binding("a", "cmd_analytics", "Toggle Analytics"),
         Binding("l", "cmd_rules", "Toggle Rules Manager"),
+        Binding("m", "cmd_selective", "Manual Browser"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -46,6 +47,7 @@ class GuardApp(App):
         yield GalleryContainer(id="gallery-container")
         yield AnalyticsContainer(id="analytics-container")
         yield RulesBuilderContainer(id="rules-container")
+        yield SelectiveDownloaderContainer(id="selective-container")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -55,6 +57,7 @@ class GuardApp(App):
         self.query_one("#gallery-container").styles.display = "none"
         self.query_one("#analytics-container").styles.display = "none"
         self.query_one("#rules-container").styles.display = "none"
+        self.query_one("#selective-container").styles.display = "none"
 
         # Bind log callback
         import core.state as cs
@@ -76,6 +79,9 @@ class GuardApp(App):
 
         # Analytics speed sliding logs
         self._recent_speed_history: list[float] = []
+
+        # Fetched history messages buffer
+        self._fetched_messages: dict = {}
 
         # Rule Editor attributes
         self._rules_list: list = []
@@ -427,6 +433,56 @@ class GuardApp(App):
             dash.styles.display = "block"
             self.title = "Telegram DL Guard Dashboard"
 
+    def toggle_selective(self) -> None:
+        dash = self.query_one("#dashboard-container")
+        settings = self.query_one("#settings-container")
+        gallery = self.query_one("#gallery-container")
+        analytics = self.query_one("#analytics-container")
+        rules = self.query_one("#rules-container")
+        selective = self.query_one("#selective-container")
+        
+        if dash.styles.display == "block":
+            dash.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            analytics.styles.display = "none"
+            rules.styles.display = "none"
+            selective.styles.display = "block"
+            self.title = "Telegram DL Guard Manual Browser"
+            
+            # Populate Target Groups dropdown inside history browser screen
+            try:
+                import sqlite3
+                conn = sqlite3.connect("logs/guard.db")
+                cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
+                db_groups = cursor.fetchall()
+                conn.close()
+                
+                options = []
+                for gid, title in db_groups:
+                    options.append((f"{title} ({gid})", str(gid)))
+                
+                # Also read config groups in case some are not cached yet
+                cfg = AppConfig.load()
+                active_gids = [g.strip() for g in (cfg.target_groups or "").split(",") if g.strip()]
+                cached_gids = [opt[1] for opt in options]
+                for gid_str in active_gids:
+                    if gid_str not in cached_gids:
+                        options.append((f"Group ID: {gid_str}", gid_str))
+                
+                sel_group = self.query_one("#selective-group-id", Select)
+                sel_group.set_options(options)
+            except Exception as ex:
+                logging.getLogger("guard").warning(f"Failed to populate Target Groups dropdown in manual browser: {ex}")
+        else:
+            selective.styles.display = "none"
+            settings.styles.display = "none"
+            gallery.styles.display = "none"
+            analytics.styles.display = "none"
+            rules.styles.display = "none"
+            dash.styles.display = "block"
+            self.title = "Telegram DL Guard Dashboard"
+
     def load_rules_to_ui(self) -> None:
         try:
             from core.rules import load_rules
@@ -635,6 +691,208 @@ class GuardApp(App):
             self.query_one("#chart-ratio-metrics", Static).update(ratio_content)
         except Exception as e:
             logging.getLogger("guard").error(f"Failed to refresh analytics screen: {e}")
+
+    async def fetch_history_media(self) -> None:
+        if not self.client or not self._background_loop or not self._background_loop.is_running():
+            self.notify("Telegram client not connected or logged in.", severity="error", title="Fetch Failed")
+            return
+            
+        group_id_val = self.query_one("#selective-group-id", Select).value
+        group_id_str = str(group_id_val).strip() if (group_id_val and str(group_id_val) != "Select.BLANK" and group_id_val != getattr(Select, "BLANK", None)) else ""
+        if not group_id_str:
+            self.notify("Please select a target group first.", severity="warning", title="Fetch Failed")
+            return
+            
+        try:
+            group_id = int(group_id_str)
+        except ValueError:
+            self.notify("Invalid group ID format.", severity="error")
+            return
+
+        limit_str = self.query_one("#selective-limit", Input).value.strip()
+        limit = int(limit_str) if (limit_str.isdigit() and int(limit_str) > 0) else 50
+
+        media_filter = self.query_one("#selective-media-filter", Select).value
+        media_filter_str = str(media_filter).strip() if (media_filter and str(media_filter) != "Select.BLANK" and media_filter != getattr(Select, "BLANK", None)) else "all"
+
+        search_query = self.query_one("#selective-search-query", Input).value.strip() or None
+
+        self.notify("Fetching history media... Check log panel for details.", title="History Browser")
+        logging.getLogger("guard").info(f"🔍 Fetching past {limit} messages from group ID: {group_id}...")
+
+        # Run history fetching thread-safely
+        async def fetch_messages_async():
+            entity = await self.client.get_entity(group_id)
+            messages = []
+            
+            # Map Telethon client messages
+            async for msg in self.client.iter_messages(entity, limit=limit, search=search_query):
+                if not msg.media:
+                    continue
+                
+                from core.download_handler import _mtype
+                mt = _mtype(msg.media)
+                if media_filter_str != "all" and mt != media_filter_str:
+                    continue
+                    
+                messages.append(msg)
+            return messages
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(fetch_messages_async(), self._background_loop)
+            messages = await asyncio.wrap_future(future)
+            
+            box = self.query_one("#selective-media-list")
+            box.remove_children()
+            
+            self._fetched_messages = {}
+            
+            if not messages:
+                box.mount(Static("\n[dim]No matching media messages found in this group.[/]\n"))
+                self.notify("Fetch completed. No media found.", severity="warning", title="History Browser")
+                return
+                
+            from core.download_handler import _media_name, _resolve_sender_info
+            from core.utils import format_bytes
+            
+            for idx, msg in enumerate(messages):
+                self._fetched_messages[msg.id] = msg
+                
+                from core.download_handler import _mtype
+                mt = _mtype(msg.media)
+                
+                # Fetch sender info safely
+                sender, _ = await _resolve_sender_info(msg)
+                
+                # Filename and size
+                fname = _media_name(msg.media, msg.date, msg.id)
+                fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
+                size_str = format_bytes(fsize) if fsize else "Unknown"
+                
+                date_str = msg.date.strftime("%Y-%m-%d %H:%M") if msg.date else "?"
+                
+                content = (
+                    f"[bold cyan]{idx + 1}. {fname[:36]}[/] [dim]({size_str})[/]\n"
+                    f"[dim]Sender:[/] {sender} | [dim]Date:[/] {date_str} | [dim]Format:[/] {mt.upper()}"
+                )
+                
+                card_text = Static(content, classes="rule-card-info")
+                checkbox = Checkbox(value=False, id=f"grp_check_{msg.id}")
+                
+                row = Horizontal(
+                    checkbox, card_text,
+                    classes="rule-card-row selective-row", id=f"sel-row-{msg.id}"
+                )
+                box.mount(row)
+                
+            self.notify(f"Successfully fetched {len(messages)} media files!", title="History Browser")
+            logging.getLogger("guard").info(f"✨ Successfully retrieved {len(messages)} media messages from group.")
+        except Exception as e:
+            self.notify(f"Fetch failed: {e}", severity="error", title="History Browser")
+            logging.getLogger("guard").error(f"Failed to fetch history: {e}")
+
+    async def download_selected_media(self) -> None:
+        if not self.client or not self._background_loop or not self._background_loop.is_running():
+            self.notify("Telegram client not connected.", severity="error")
+            return
+            
+        box = self.query_one("#selective-media-list")
+        checked_ids = []
+        for chk in box.query(Checkbox):
+            if chk.value:
+                msg_id = int(chk.id.replace("grp_check_", ""))
+                checked_ids.append(msg_id)
+                
+        if not checked_ids:
+            self.notify("Please select at least one media file to download.", severity="warning", title="Selective Downloader")
+            return
+            
+        self.notify(f"Queueing {len(checked_ids)} manual downloads...", title="Selective Downloader")
+        logging.getLogger("guard").info(f"📥 Queueing {len(checked_ids)} manual historical downloads...")
+        
+        # Load CFG and directories
+        import core.download_handler as dh
+        from listener import _do_download
+        
+        cfg = dh.CFG or AppConfig.load()
+        ddir = Path(cfg.download_dir)
+        
+        # Retrieve target group details
+        group_id_val = self.query_one("#selective-group-id", Select).value
+        group_id_str = str(group_id_val).strip() if (group_id_val and str(group_id_val) != "Select.BLANK" and group_id_val != getattr(Select, "BLANK", None)) else ""
+        
+        try:
+            import sqlite3
+            conn = sqlite3.connect("logs/guard.db")
+            cursor = conn.execute("SELECT group_title FROM group_cache WHERE group_id = ?", (group_id_str,))
+            row = cursor.fetchone()
+            conn.close()
+            group_title = row[0] if row else group_id_str
+        except Exception:
+            group_title = group_id_str
+            
+        from core.utils import sanitize_group
+        from core.state import UPLOAD_QUEUE
+        
+        # Run downloading in the background thread safely
+        async def run_manual_downloads():
+            downloaded = 0
+            for mid in checked_ids:
+                msg = self._fetched_messages.get(mid)
+                if not msg:
+                    continue
+                    
+                from core.download_handler import _mtype, _media_name, _resolve_sender_info, _resolve_download_path
+                mt = _mtype(msg.media)
+                sender, username = await _resolve_sender_info(msg)
+                
+                # Check target path
+                target_dir = ddir / sanitize_group(group_title) / sender
+                fname = _media_name(msg.media, msg.date, msg.id)
+                fpath = target_dir / fname
+                
+                # Check rules or standard paths
+                original_caption = (getattr(msg, "message", None) or "").strip()
+                rule_priority = False
+                
+                if dh._rules and not getattr(cfg, "super_grabber_mode", False):
+                    from core.rules import evaluate_rules
+                    fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
+                    rule_action = evaluate_rules(dh._rules, sender, fname, mt, fsize, group_title)
+                    if rule_action:
+                        if rule_action.skip:
+                            continue
+                        rule_priority = rule_action.priority
+                        if rule_action.tag:
+                            if original_caption and f"#{rule_action.tag}" not in original_caption:
+                                original_caption = f"{original_caption} #{rule_action.tag}".strip()
+                        if rule_action.move_to:
+                            from core.rules import move_to_folder
+                            fpath = move_to_folder(fpath, rule_action.move_to)
+                            
+                fpath = _resolve_download_path(fpath, getattr(getattr(msg.media, "document", None), "size", 0) or None, msg.id)
+                if fpath is None:
+                    continue  # duplicate
+                    
+                # Standard download
+                ok = await _do_download(
+                    self.client, msg, fpath, fpath.parent, mt, sender, username,
+                    group_title, original_caption, None,
+                    getattr(getattr(msg.media, "document", None), "size", 0) or 0,
+                    UPLOAD_QUEUE, cfg.dedup_method, cfg.show_speed,
+                    priority=rule_priority
+                )
+                if ok:
+                    downloaded += 1
+            return downloaded
+
+        try:
+            # Dispatch to background thread safely
+            asyncio.run_coroutine_threadsafe(run_manual_downloads(), self._background_loop)
+            self.notify("Selective downloads started. Progress bars will appear in the dashboard.")
+            self.toggle_selective()
+        except Exception as e:
+            self.notify(f"Failed to start downloads: {e}", severity="error")
 
     def load_config_to_ui(self) -> None:
         try:
@@ -1291,6 +1549,28 @@ class GuardApp(App):
             self.toggle_rules()
         elif btn_id == "btn-back-analytics":
             self.toggle_analytics()
+        elif btn_id == "btn-fetch-history":
+            asyncio.create_task(self.fetch_history_media())
+        elif btn_id == "btn-download-selected":
+            asyncio.create_task(self.download_selected_media())
+        elif btn_id == "btn-select-all":
+            try:
+                box = self.query_one("#selective-media-list")
+                for chk in box.query(Checkbox):
+                    chk.value = True
+                self.notify("All files selected.")
+            except Exception:
+                pass
+        elif btn_id == "btn-clear-selection":
+            try:
+                box = self.query_one("#selective-media-list")
+                for chk in box.query(Checkbox):
+                    chk.value = False
+                self.notify("Selection cleared.")
+            except Exception:
+                pass
+        elif btn_id == "btn-back-selective":
+            self.toggle_selective()
 
     def action_cmd_start(self) -> None:
         if not self.listener_task:
@@ -1319,6 +1599,9 @@ class GuardApp(App):
 
     def action_cmd_rules(self) -> None:
         self.toggle_rules()
+
+    def action_cmd_selective(self) -> None:
+        self.toggle_selective()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "setting-raw-file-select":

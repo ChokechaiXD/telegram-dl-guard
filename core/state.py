@@ -239,6 +239,9 @@ def persist_state(processed_ids: OrderedDict[int, bool], group_cache: dict[int, 
 
 # ── Single-process In-memory Logging & Status sharing ──────────
 
+# Thread-safe global upload queue shared between engine thread and TUI thread
+UPLOAD_QUEUE = None
+
 # Global shared status updated by listener/uploader and read directly by TUI
 GLOBAL_STATUS = {
     "running": False,

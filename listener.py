@@ -367,6 +367,8 @@ async def run(provided_client: TelegramClient | None = None) -> None:
     upload_task = None
     if CFG.upload_enabled and CFG.storage_group_id:
         upload_queue = asyncio.PriorityQueue()
+        import core.state as cs
+        cs.UPLOAD_QUEUE = upload_queue
         try:
             storage_gid = int(CFG.storage_group_id)
             upload_mode = os.getenv("UPLOAD_MODE", "realtime_keep")
