@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telegram DL Guard — Web Companion</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <!-- Main Style -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Main App Container -->
+    <div class="app-container">
+        
+        <!-- Header -->
+        <header class="app-header glass">
+            <div class="header-logo">
+                <span class="logo-symbol">■</span>
+                <div class="logo-text">
+                    <h1>Telegram DL Guard</h1>
+                    <span class="logo-subtitle">Premium Web Companion</span>
+                </div>
+            </div>
+            <div class="system-status">
+                <div class="status-indicator">
+                    <span class="pulse-dot"></span>
+                    <span id="txt-status">Web Service Connected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="app-main">
+            
+            <!-- Sidebar Controls Panel -->
+            <section class="controls-panel glass">
+                <h2 class="panel-title">Fetch Configuration</h2>
+                
+                <div class="form-group">
+                    <label for="select-group">Target Telegram Group</label>
+                    <select id="select-group" class="form-input">
+                        <option value="">-- Load Target Group --</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="input-limit">Scan Message Depth</label>
+                    <div class="range-container">
+                        <input type="range" id="slider-limit" min="10" max="500" step="10" value="100" class="slider-input">
+                        <input type="number" id="input-limit" min="10" max="1000" value="100" class="form-input number-input">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Filter Media Type</label>
+                    <div class="media-tabs">
+                        <button class="tab-btn active" data-type="all">All</button>
+                        <button class="tab-btn" data-type="photo">Photos</button>
+                        <button class="tab-btn" data-type="video">Videos</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="input-query">Search Keyword (Optional)</label>
+                    <input type="text" id="input-query" placeholder="e.g. caption keywords..." class="form-input">
+                </div>
+
+                <button id="btn-fetch" class="btn btn-primary">Fetch Group Media</button>
+            </section>
+
+            <!-- Media Grid Area -->
+            <section class="media-display-section">
+                
+                <!-- Section Header -->
+                <div class="display-header">
+                    <h2>Group Media Results</h2>
+                    <span id="results-counter" class="results-badge">0 items found</span>
+                </div>
+                
+                <!-- Lasso Selection & Masonry Grid Wrapper -->
+                <div class="grid-scroll-container glass" id="grid-container">
+                    
+                    <!-- Masonry Grid -->
+                    <div class="media-grid" id="media-grid">
+                        <div class="grid-placeholder">
+                            <span class="placeholder-icon">🔎</span>
+                            <p>Configure parameters and click "Fetch Group Media" to browse visual files.</p>
+                            <span class="placeholder-tip">Tip: Click and drag your mouse over cards to select them in bulk instantly!</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Visual Selection Lasso Box -->
+                    <div id="lasso-box" class="lasso-box"></div>
+                </div>
+                
+            </section>
+            
+        </main>
+        
+    </div>
+
+    <!-- Floating Action Toolbar (Bottom) -->
+    <div class="floating-toolbar glass" id="floating-toolbar">
+        <div class="toolbar-info">
+            <span class="selection-count">Selected: <strong id="selected-count">0</strong> items</span>
+        </div>
+        <div class="toolbar-actions">
+            <button id="btn-select-all" class="btn btn-secondary">Select All</button>
+            <button id="btn-clear-selection" class="btn btn-secondary">Clear</button>
+            <button id="btn-download" class="btn btn-success">Download Selected Files</button>
+        </div>
+    </div>
+
+    <!-- Video Modal Viewer -->
+    <div class="video-modal" id="video-modal">
+        <div class="modal-overlay" onclick="closeVideoModal()"></div>
+        <div class="modal-content glass">
+            <button class="close-modal-btn" onclick="closeVideoModal()">×</button>
+            <div class="video-player-container">
+                <video id="modal-video-player" controls autoplay></video>
+            </div>
+            <div class="modal-meta">
+                <h3 id="modal-title">Video Stream</h3>
+                <p id="modal-desc"></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

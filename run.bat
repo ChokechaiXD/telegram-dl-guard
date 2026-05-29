@@ -15,7 +15,8 @@ if "%~1"=="" goto menu
 if "%~1"=="1" goto tui
 if "%~1"=="2" goto setup
 if "%~1"=="3" goto listen
-if "%~1"=="4" goto update
+if "%~1"=="4" goto web
+if "%~1"=="5" goto update
 goto menu
 
 :menu
@@ -25,14 +26,16 @@ echo ========================================
 echo   1 — Run DL Guard (Interactive TUI)
 echo   2 — Setup Wizard (Initial Login)
 echo   3 — Start Headless Daemon
-echo   4 — Update/Verify Dependencies
+echo   4 — Start Web Dashboard (Premium Grid UI)
+echo   5 — Update/Verify Dependencies
 echo   0 — Exit
 echo ========================================
 set /p c="> "
 if "%c%"=="1" goto tui
 if "%c%"=="2" goto setup
 if "%c%"=="3" goto listen
-if "%c%"=="4" goto update
+if "%c%"=="4" goto web
+if "%c%"=="5" goto update
 if "%c%"=="0" exit /b
 goto menu
 
@@ -52,7 +55,13 @@ venv\Scripts\python guard.py --listen
 pause
 goto menu
 
+:web
+set PYTHONUNBUFFERED=1
+venv\Scripts\python web_server.py
+pause
+goto menu
+
 :update
-venv\Scripts\python run.py 4
+venv\Scripts\python run.py 5
 pause
 goto menu

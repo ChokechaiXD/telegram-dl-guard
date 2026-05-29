@@ -52,7 +52,8 @@ def menu() -> str:
     print("  1  Run DL Guard (Interactive TUI)")
     print("  2  Setup Wizard (Initial Login)")
     print("  3  Start Headless Daemon")
-    print("  4  Update/Verify Dependencies")
+    print("  4  Start Web Dashboard (Premium Grid UI)")
+    print("  5  Update/Verify Dependencies")
     print()
     print("  0  Exit")
     print()
@@ -65,9 +66,10 @@ def run_action(choice: str) -> bool:
         "1": ["tui.py"],
         "2": ["guard.py", "--setup"],
         "3": ["guard.py", "--listen"],
+        "4": ["web_server.py"],
     }
     
-    if choice == "4":
+    if choice == "5":
         update_dependencies()
         return True
 
@@ -86,7 +88,7 @@ def run_action(choice: str) -> bool:
     except KeyboardInterrupt:
         pass
         
-    return choice in ("2", "3")
+    return choice in ("2", "3", "4")
 
 
 def main() -> None:
@@ -99,7 +101,8 @@ def main() -> None:
             "1": "1", "tui": "1", "--tui": "1",
             "2": "2", "setup": "2", "--setup": "2",
             "3": "3", "listen": "3", "--listen": "3",
-            "4": "4", "update": "4", "--update": "4",
+            "4": "4", "web": "4", "dashboard": "4", "--web": "4",
+            "5": "5", "update": "5", "--update": "5",
         }
         choice = alias.get(arg)
         if choice:
@@ -109,7 +112,7 @@ def main() -> None:
             return
         else:
             print(f"Unknown argument: {sys.argv[1]}")
-            print("Usage: python run.py [1|2|3|4|tui|setup|listen|update]")
+            print("Usage: python run.py [1|2|3|4|5|tui|setup|listen|web|update]")
             sys.exit(1)
 
     while True:
