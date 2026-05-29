@@ -1548,6 +1548,12 @@ class GuardApp(App):
             self.toggle_settings()
         elif btn_id == "btn-goto-gallery" or btn_id == "btn-back-gallery":
             asyncio.create_task(self.toggle_gallery())
+        elif btn_id == "btn-goto-rules" or btn_id == "btn-back-rules":
+            self.toggle_rules()
+        elif btn_id == "btn-goto-analytics" or btn_id == "btn-back-analytics":
+            self.toggle_analytics()
+        elif btn_id == "btn-goto-selective" or btn_id == "btn-back-selective":
+            self.toggle_selective()
         elif btn_id == "btn-save-settings":
             self.save_config_from_ui()
         elif btn_id == "btn-reset-settings":
@@ -1574,10 +1580,7 @@ class GuardApp(App):
         elif btn_id == "btn-refresh-analytics":
             asyncio.create_task(self.refresh_analytics_screen())
             self.notify("Refreshed system metrics.")
-        elif btn_id == "btn-back-rules":
-            self.toggle_rules()
-        elif btn_id == "btn-back-analytics":
-            self.toggle_analytics()
+
         elif btn_id == "btn-fetch-history":
             asyncio.create_task(self.fetch_history_media())
         elif btn_id == "btn-download-selected":
@@ -1598,8 +1601,7 @@ class GuardApp(App):
                 self.notify("Selection cleared.")
             except Exception:
                 pass
-        elif btn_id == "btn-back-selective":
-            self.toggle_selective()
+
 
     def action_cmd_start(self) -> None:
         if not self.listener_task:

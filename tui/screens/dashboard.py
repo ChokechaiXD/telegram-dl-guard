@@ -25,11 +25,14 @@ class DashboardContainer(Container):
                     with Horizontal(classes="controls-row"):
                         yield Button("Start", id="btn-start", variant="success")
                         yield Button("Pause", id="btn-pause", variant="warning")
-                    with Horizontal(classes="controls-row"):
                         yield Button("Restart", id="btn-restart", variant="primary")
-                        yield Button("Settings", id="btn-goto-settings", variant="default")
                     with Horizontal(classes="controls-row"):
+                        yield Button("Settings", id="btn-goto-settings", variant="default")
                         yield Button("Media Gallery", id="btn-goto-gallery", variant="default")
+                    with Horizontal(classes="controls-row"):
+                        yield Button("Rules Builder", id="btn-goto-rules", variant="default")
+                        yield Button("Visual Analytics", id="btn-goto-analytics", variant="default")
+                        yield Button("Manual DL", id="btn-goto-selective", variant="default")
             
             with Vertical(id="right-panel"):
                 yield RichLog(id="log-panel", wrap=True, highlight=True)
