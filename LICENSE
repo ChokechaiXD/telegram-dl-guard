@@ -1,6 +1,22 @@
-Non-Commercial Personal Use License
+Non-Commercial Personal Use License & Disclaimer of Liability
 
 Copyright (c) 2026 Chokechai
+
+DISCLAIMER OF LIABILITY AND RESPONSIBILITY:
+This Software is provided for educational, personal archiving, and backup purposes only. The developers and contributors of this Software accept no responsibility or liability for:
+
+1. CONTENT COPYRIGHT AND LEGALITY:
+Any files, media, or content downloaded, stored, or uploaded using this Software are the sole responsibility of the user. The developers do not condone, encourage, or facilitate copyright infringement, piracy, or unauthorized distribution of private or copyrighted materials. Users must ensure they have all necessary legal rights and permissions before downloading or sharing any content.
+
+2. TELEGRAM TERMS OF SERVICE COMPLIANCE:
+Automating account actions can violate Telegram's Terms of Service and API policies. The developers make no guarantees regarding account safety. Users use this Software entirely at their own risk, and the developers shall not be liable for any account restrictions, suspensions, bans, or data loss resulting from the use of this Software.
+
+3. NO WARRANTIES:
+The Software is provided "AS IS", without warranty of any kind, express or implied. Under no circumstances shall the authors or copyright holders be liable for any claims, damages, or other liabilities arising from, out of, or in connection with the Software or the use or other dealings in the Software.
+
+-------------------------------------------------------------------------------
+
+TERMS OF LICENSE:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to use,
@@ -15,18 +31,10 @@ includes, but is not limited to, charging fees for access, selling compiled
 binaries, bundling with paid software, or using the Software as a paid service.
 
 2. LICENSE RETENTION:
-The above copyright notice, this permission notice, and all disclaimers must
-be included in all copies or substantial portions of the Software.
+The above copyright notice, this disclaimer of liability, and this permission 
+notice must be included in all copies or substantial portions of the Software.
 
 3. FREE REDISTRIBUTION REQUIREMENT:
 Any redistribution of the Software, modified or unmodified, must remain
 completely free of charge, non-commercial, and licensed under these identical
 terms.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.

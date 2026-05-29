@@ -18,6 +18,12 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 
 </div>
 
+> [!CAUTION]
+> **DISCLAIMER & LIABILITY WARNING**: This Software is provided for **educational and personal archiving/backup purposes only**. 
+> - **Content Copyright**: The user is solely responsible for all downloaded/uploaded files. The developer does not encourage or condone copyright infringement or unauthorized distribution of private materials.
+> - **Telegram ToS**: Automating user accounts violates Telegram API guidelines. The developer is NOT responsible for account suspensions, bans, rate limits, or data loss. Use at your own risk.
+> - **No Warranty**: This software is provided "as is" with no warranty or liability of any kind.
+
 ---
 
 ## ✨ Features
