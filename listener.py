@@ -160,6 +160,7 @@ async def _do_download(
             "current": 0,
             "total": file_size or 1,
             "speed": "0 B/s",
+            "speed_bps": 0.0,
             "eta": "ETA: ?"
         }
 
@@ -199,6 +200,7 @@ async def _do_download(
                 "current": cur,
                 "total": total_val or cur or 1,
                 "speed": speed_str,
+                "speed_bps": speed_bps,
                 "eta": eta_str
             }
 

@@ -1115,22 +1115,7 @@ class GuardApp(App):
                     self._prog_was_empty = True
             
             # Calculate aggregate active download speed
-            curr_speed = 0.0
-            for msg_id, info in list(ACTIVE_DOWNLOADS.items()):
-                speed_str = info.get("speed", "0 B/s")
-                try:
-                    parts = speed_str.split()
-                    if len(parts) == 2:
-                        val = float(parts[0])
-                        unit = parts[1].lower()
-                        if "mb/s" in unit:
-                            curr_speed += val * 1_048_576
-                        elif "kb/s" in unit:
-                            curr_speed += val * 1024
-                        else:
-                            curr_speed += val
-                except Exception:
-                    pass
+            curr_speed = sum(info.get("speed_bps", 0.0) for info in ACTIVE_DOWNLOADS.values())
             
             self._recent_speed_history.append(curr_speed)
             if len(self._recent_speed_history) > 30:

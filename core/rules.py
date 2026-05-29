@@ -88,8 +88,6 @@ def load_rules(path: Path | None = None) -> list[Rule]:
             return []
         rules = []
         for r in rules_data:
-            if not r.get("enabled", True):
-                continue
             cond_data = r.get("when", {})
             cond = RuleCondition(
                 sender=cond_data.get("sender"),
@@ -108,7 +106,7 @@ def load_rules(path: Path | None = None) -> list[Rule]:
                 priority=act_data.get("priority", False),
                 move_to=act_data.get("move_to"),
             )
-            rules.append(Rule(name=r.get("name", "unnamed"), condition=cond, action=action))
+            rules.append(Rule(name=r.get("name", "unnamed"), condition=cond, action=action, enabled=r.get("enabled", True)))
         log.info("Loaded %d rules from %s", len(rules), p)
         return rules
     except Exception as e:
@@ -120,6 +118,8 @@ def compile_rules(rules: list[Rule]) -> list[tuple[Rule, re.Pattern | None]]:
     """Pre-compile regex patterns for performance."""
     compiled = []
     for rule in rules:
+        if not rule.enabled:
+            continue
         pattern = None
         if rule.condition.filename_regex:
             try:
