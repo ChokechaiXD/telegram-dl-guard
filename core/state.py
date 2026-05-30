@@ -763,12 +763,14 @@ def get_cached_groups() -> list[dict[str, str]]:
 
 
 def save_cached_groups(groups: list[tuple[int, str]]) -> None:
-    """Save group caches in bulk to SQLite cache in a thread-safe manner."""
+    """Save group caches in bulk to SQLite cache in a thread-safe manner, clearing old entries first."""
     global _conn
     with _db_lock:
         try:
             with _conn:
-                _conn.executemany("INSERT OR REPLACE INTO group_cache (group_id, group_title) VALUES (?, ?)", groups)
+                _conn.execute("DELETE FROM group_cache")
+                if groups:
+                    _conn.executemany("INSERT OR REPLACE INTO group_cache (group_id, group_title) VALUES (?, ?)", groups)
         except Exception as e:
             log.error("Failed to save cached groups in bulk: %s", e)
 

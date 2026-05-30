@@ -240,11 +240,11 @@ class GuardApp(App):
             return
             
         self.notify("Fetching dialogs from Telegram... (Please check Log Panel)", title="Syncing Groups")
-        logging.getLogger("guard").info("🔍 Fetching target groups from Telegram dialogs Asynchronously...")
+        logging.getLogger("guard").info("Fetching target groups from Telegram dialogs Asynchronously...")
         
         try:
             # Fetch all dialogues thread-safely with a 20-second timeout to prevent indefinite hangs
-            future = asyncio.run_coroutine_threadsafe(self.client.get_dialogs(), self._background_loop)
+            future = asyncio.run_coroutine_threadsafe(self.client.get_dialogs(limit=None), self._background_loop)
             dialogs = await asyncio.wait_for(asyncio.wrap_future(future), timeout=20.0)
             groups = [d for d in dialogs if d.is_group or d.is_channel]
             
@@ -252,7 +252,7 @@ class GuardApp(App):
                 logging.getLogger("guard").warning("No groups or channels found on this account.")
                 return
                 
-            logging.getLogger("guard").info(f"✨ Found {len(groups)} groups/channels on your Telegram:")
+            logging.getLogger("guard").info(f"Found {len(groups)} groups/channels on your Telegram:")
             
             for g in groups:
                 logging.getLogger("guard").info(f"   Group: [bold cyan]{g.title}[/] | ID: [green]{g.id}[/]")
@@ -268,10 +268,10 @@ class GuardApp(App):
             self.notify("Sync complete! Group list printed in the Logs panel.", title="Groups Synced")
         except asyncio.TimeoutError:
             self.notify("Sync failed: Request timed out. Telegram might be slow or rate-limiting.", severity="error", title="Sync Timeout")
-            logging.getLogger("guard").error("❌ Group sync timed out. Telegram connection might be congested.")
+            logging.getLogger("guard").error("Group sync timed out. Telegram connection might be congested.")
         except Exception as e:
             self.notify(f"Sync failed: {e}", severity="error", title="Sync Failed")
-            logging.getLogger("guard").error(f"❌ Group sync failed: {e}")
+            logging.getLogger("guard").error(f"Group sync failed: {e}")
 
     _LOG_STYLES = {
         "error": "bold red",
