@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
-from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll
 from textual.widgets import Label, Static, Button
-
-import core.state as cs
-from core.utils import format_bytes
 
 class AnalyticsContainer(VerticalScroll):
     """Container holding the premium real-time charts and historical database volume statistics."""

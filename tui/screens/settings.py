@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Label, Button, Input, Select, Switch, TextArea, Checkbox
+from textual.widgets import Label, Button, Input, Select, Switch, TextArea
 
 class SettingsContainer(VerticalScroll):
     """Container holding all the dynamic forms for system configuration."""
@@ -235,6 +235,18 @@ class SettingsContainer(VerticalScroll):
                     ],
                     id="setting-history-hours",
                     prompt="Select Timeframe"
+                )
+            with Horizontal(classes="setting-row"):
+                yield Label("History Scan Cap:")
+                yield Select(
+                    options=[
+                        ("100 Messages / Group", "100"),
+                        ("500 Messages / Group", "500"),
+                        ("1000 Messages / Group", "1000"),
+                        ("2000 Messages / Group", "2000")
+                    ],
+                    id="setting-history-max-messages",
+                    prompt="Select Scan Cap"
                 )
             with Horizontal(classes="setting-row"):
                 yield Label("Filename Format:")

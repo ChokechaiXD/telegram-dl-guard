@@ -8,6 +8,7 @@ const selectGroup = document.getElementById("select-group");
 const sliderLimit = document.getElementById("slider-limit");
 const inputLimit = document.getElementById("input-limit");
 const btnFetch = document.getElementById("btn-fetch");
+const btnSyncGroups = document.getElementById("btn-sync-groups");
 const mediaGrid = document.getElementById("media-grid");
 const resultsCounter = document.getElementById("results-counter");
 const gridContainer = document.getElementById("grid-container");
@@ -65,7 +66,7 @@ function setupTabFilters() {
 // --- 3. Fetch Dialog Groups ---
 async function loadGroups() {
     try {
-        const response = await fetch("/api/groups");
+        const response = await fetch("/api/groups", { cache: "no-store" });
         if (!response.ok) throw new Error("Failed to load Telegram groups");
         const groups = await response.json();
         
@@ -81,6 +82,25 @@ async function loadGroups() {
         alert("Failed to load Telegram groups. Check that the wizard login is active.");
     }
 }
+
+btnSyncGroups.addEventListener("click", async () => {
+    btnSyncGroups.disabled = true;
+    btnSyncGroups.textContent = "Syncing Groups...";
+    try {
+        const response = await fetch("/api/groups/sync", { method: "POST", cache: "no-store" });
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData.detail || "Group sync request failed");
+        }
+        await loadGroups();
+    } catch (error) {
+        console.error(error);
+        alert(`Group Sync Failed: ${error.message}`);
+    } finally {
+        btnSyncGroups.disabled = false;
+        btnSyncGroups.textContent = "Sync Groups";
+    }
+});
 
 // --- 4. Fetch Media Messages ---
 btnFetch.addEventListener("click", async () => {
@@ -461,7 +481,10 @@ function setupFloatingToolbar() {
                 body: JSON.stringify(payload)
             });
             
-            if (!response.ok) throw new Error("Bulk download request failed");
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.detail || "Bulk download request failed");
+            }
             const res = await response.json();
             
             alert(`Successfully added ${res.queued_items} items into the global downloads queue! Progress will update in the console / TUI.`);

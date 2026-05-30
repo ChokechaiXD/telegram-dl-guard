@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -50,6 +49,7 @@ async def run_history_scan(
     mode = cfg.history_mode  # "list" or "auto"
     reverse = cfg.history_reverse
     is_super = cfg.super_grabber_mode
+    max_messages = max(1, getattr(cfg, "history_max_messages", 500))
 
     media_set = {t.strip() for t in cfg.media_types.split(",") if t.strip()}
     blocked = [s.strip().lower() for s in cfg.blocked_senders.split(",") if s.strip()] if cfg.blocked_senders else []
@@ -63,7 +63,7 @@ async def run_history_scan(
         "History scan: mode=%s, hours=%d, reverse=%s, super=%s, peers=%d",
         mode, hours, reverse, is_super, len(peer_ids),
     )
-    print(f"  [History] Scanning last {hours}h (mode={mode}, groups={len(peer_ids)})")
+    print(f"  [History] Scanning last {hours}h (mode={mode}, groups={len(peer_ids)}, max={max_messages}/group)")
 
     for pid in peer_ids:
         try:
@@ -94,6 +94,9 @@ async def run_history_scan(
                         continue
 
                 scanned += 1
+                if scanned > max_messages:
+                    log.info("History: reached per-group scan cap (%d) for %s", max_messages, group_title)
+                    break
 
                 if not msg.media:
                     continue

@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
 import time
 import asyncio
 import logging
@@ -18,6 +17,8 @@ from config import AppConfig
 from dotenv import set_key
 from core.state import GLOBAL_STATUS, ACTIVE_DOWNLOADS
 from core.utils import format_bytes
+from services.group_sync import fetch_group_choices, to_cache_rows
+from services.paths import build_transfer_path
 
 from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, SelectiveDownloaderContainer
 
@@ -84,12 +85,15 @@ class GuardApp(App):
         self._prog_panel = self.query_one("#progress-panel")
         self._prog_box = self.query_one("#active-downloads-box")
         self._log_panel = self.query_one("#log-panel", RichLog)
+        self._log_lines: list[Text] = []
 
         # Analytics speed sliding logs
         self._recent_speed_history: list[float] = []
+        self._analytics_refreshing = False
 
         # Fetched history messages buffer
         self._fetched_messages: dict = {}
+        self._last_groups_sync_at = 0.0
 
         # Dirty-check state
         self._last_status = ""
@@ -235,18 +239,11 @@ class GuardApp(App):
 
     async def sync_telegram_groups(self) -> None:
         """Fetch all groups/channels Asynchronously, save names to cache and print to Log Panel."""
-        if not await self.ensure_client_connected():
-            self.notify("Telegram client not connected or logged in. Please click 'Start' on Dashboard or login first.", severity="error", title="Sync Failed")
-            return
-            
         self.notify("Fetching dialogs from Telegram... (Please check Log Panel)", title="Syncing Groups")
-        logging.getLogger("guard").info("Fetching target groups from Telegram dialogs Asynchronously...")
+        logging.getLogger("guard").info("Fetching target groups from Telegram dialogs...")
         
         try:
-            # Fetch all dialogues thread-safely with a 20-second timeout to prevent indefinite hangs
-            future = asyncio.run_coroutine_threadsafe(self.client.get_dialogs(limit=None), self._background_loop)
-            dialogs = await asyncio.wait_for(asyncio.wrap_future(future), timeout=20.0)
-            groups = [d for d in dialogs if d.is_group or d.is_channel]
+            groups = await self.fetch_live_group_choices(force=True)
             
             if not groups:
                 logging.getLogger("guard").warning("No groups or channels found on this account.")
@@ -254,13 +251,8 @@ class GuardApp(App):
                 
             logging.getLogger("guard").info(f"Found {len(groups)} groups/channels on your Telegram:")
             
-            for g in groups:
-                logging.getLogger("guard").info(f"   Group: [bold cyan]{g.title}[/] | ID: [green]{g.id}[/]")
-                
-            # Perform SQLite writing in a background thread to prevent blocking/freezing the Textual main TUI thread
-            import core.state as cs
-            groups_to_save = [(g.id, g.title or "Untitled") for g in groups]
-            await asyncio.to_thread(cs.save_cached_groups, groups_to_save)
+            for gid, title in groups:
+                logging.getLogger("guard").info(f"   Group: [bold cyan]{title}[/] | ID: [green]{gid}[/]")
             
             # Dynamically refresh the settings checkboxes and dropdowns with the newly synced groups immediately
             self.call_after_refresh(lambda: asyncio.create_task(self.load_config_to_ui()))
@@ -273,6 +265,43 @@ class GuardApp(App):
             self.notify(f"Sync failed: {e}", severity="error", title="Sync Failed")
             logging.getLogger("guard").error(f"Group sync failed: {e}")
 
+    async def fetch_live_group_choices(self, force: bool = False) -> list[tuple[int, str]]:
+        """Fetch real Telegram groups/channels with a short-lived read-only client."""
+        cfg = AppConfig.load()
+        if not (cfg.session_string and cfg.api_id and cfg.api_hash):
+            return []
+
+        now = time.time()
+        if not force and now - self._last_groups_sync_at < 60:
+            import core.state as cs
+            cached = await asyncio.to_thread(cs.get_cached_groups)
+            if cached:
+                return [(int(g["id"]), g["title"]) for g in cached]
+
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        import core.state as cs
+
+        cli = TelegramClient(
+            StringSession(cfg.session_string),
+            cfg.api_id,
+            cfg.api_hash,
+            connection_retries=2,
+            retry_delay=1,
+            auto_reconnect=False,
+        )
+        try:
+            await cli.connect()
+            if not await cli.is_user_authorized():
+                return []
+            groups = await asyncio.wait_for(fetch_group_choices(cli), timeout=25.0)
+            rows = to_cache_rows(groups)
+            await asyncio.to_thread(cs.save_cached_groups, rows)
+            self._last_groups_sync_at = time.time()
+            return rows
+        finally:
+            await cli.disconnect()
+
     _LOG_STYLES = {
         "error": "bold red",
         "warning": "bold yellow",
@@ -283,9 +312,47 @@ class GuardApp(App):
         try:
             ts = datetime.now().strftime("%H:%M:%S")
             style = self._LOG_STYLES.get(level, "green")
-            self.call_from_thread(self._log_panel.write, Text(f"[{ts}] {msg}", style=style))
+            line = Text(f"[{ts}] {msg}", style=style)
+            self._log_lines.append(line)
+            if len(self._log_lines) > 500:
+                self._log_lines = self._log_lines[-500:]
+
+                def redraw_log() -> None:
+                    self._log_panel.clear()
+                    for item in self._log_lines:
+                        self._log_panel.write(item)
+
+                self.call_from_thread(redraw_log)
+            else:
+                self.call_from_thread(self._log_panel.write, line)
         except Exception:
             pass
+
+    def persist_target_groups_from_ui(self, notify: bool = False) -> str:
+        checked_gids = []
+        try:
+            container = self.query_one("#setting-target-groups-container")
+            for chk in container.query(Checkbox):
+                if chk.value and chk.id and chk.id.startswith("target_group_"):
+                    checked_gids.append(chk.id.replace("target_group_", "").replace("neg", "-"))
+        except Exception as ex:
+            logging.getLogger("guard").warning(f"Failed to read target group checkboxes: {ex}")
+
+        custom_gids_str = self.query_one("#setting-target-groups", Input).value.strip()
+        custom_gids = [g.strip() for g in custom_gids_str.split(",") if g.strip()]
+
+        all_gids = []
+        seen = set()
+        for gid in checked_gids + custom_gids:
+            if gid not in seen:
+                seen.add(gid)
+                all_gids.append(gid)
+
+        target_groups = ",".join(all_gids)
+        set_key(".env", "TARGET_GROUPS", target_groups)
+        if notify:
+            self.notify(f"Target groups saved: {len(all_gids)} selected. Restart listener to apply active peer filters.", title="Target Groups")
+        return target_groups
 
     async def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
         """Trigger dynamic preview rendering and details inspector inside the TUI gallery."""
@@ -491,6 +558,9 @@ class GuardApp(App):
             self.title = "Telegram DL Guard Dashboard"
 
     async def refresh_analytics_screen(self) -> None:
+        if self._analytics_refreshing:
+            return
+        self._analytics_refreshing = True
         try:
             import core.state as cs
             from tui.screens.analytics import draw_speed_chart, draw_mime_distribution, draw_7day_volume_chart, draw_system_ratio_metrics
@@ -510,6 +580,8 @@ class GuardApp(App):
             self.query_one("#chart-ratio-metrics", Static).update(ratio_content)
         except Exception as e:
             logging.getLogger("guard").error(f"Failed to refresh analytics screen: {e}")
+        finally:
+            self._analytics_refreshing = False
 
     async def ensure_client_connected(self) -> bool:
         """Ensures the Telegram background client is connected. Returns True if successful."""
@@ -558,6 +630,8 @@ class GuardApp(App):
         self.notify("Fetching history media... Check log panel for details.", title="History Browser")
         logging.getLogger("guard").info(f"Fetching past {limit} messages from group ID: {group_id}...")
 
+        from core.download_handler import _mtype
+
         # Run history fetching thread-safely
         async def fetch_messages_async():
             entity = await self.client.get_entity(group_id)
@@ -568,7 +642,6 @@ class GuardApp(App):
                 if not msg.media:
                     continue
                 
-                from core.download_handler import _mtype
                 mt = _mtype(msg.media)
                 if media_filter_str != "all" and mt != media_filter_str:
                     continue
@@ -596,7 +669,6 @@ class GuardApp(App):
             for idx, msg in enumerate(messages):
                 self._fetched_messages[msg.id] = msg
                 
-                from core.download_handler import _mtype
                 mt = _mtype(msg.media)
                 
                 # Fetch sender info safely
@@ -684,7 +756,6 @@ class GuardApp(App):
         except Exception:
             group_title = group_id_str
             
-        from core.utils import sanitize_group
         from core.state import UPLOAD_QUEUE
         
         # Run downloading in the background thread safely
@@ -699,15 +770,11 @@ class GuardApp(App):
                 mt = _mtype(msg.media)
                 sender, username = await _resolve_sender_info(msg)
                 
-                # Check target path
-                target_dir = ddir / sanitize_group(group_title) / sender
                 fname = _media_name(msg.media, msg.date, msg.id)
-                fpath = target_dir / fname
+                fpath = build_transfer_path(ddir, group_title, sender, fname)
                 
                 # Check standard paths
                 original_caption = (getattr(msg, "message", None) or "").strip()
-                rule_priority = False
-                            
                 fpath = _resolve_download_path(fpath, getattr(getattr(msg.media, "document", None), "size", 0) or None, msg.id)
                 if fpath is None:
                     continue  # duplicate
@@ -717,8 +784,7 @@ class GuardApp(App):
                     self.client, msg, fpath, fpath.parent, mt, sender, username,
                     group_title, original_caption, None,
                     getattr(getattr(msg.media, "document", None), "size", 0) or 0,
-                    UPLOAD_QUEUE, cfg.dedup_method, cfg.show_speed,
-                    priority=rule_priority
+                    UPLOAD_QUEUE, cfg.dedup_method, cfg.show_speed
                 )
                 if ok:
                     downloaded += 1
@@ -742,8 +808,10 @@ class GuardApp(App):
             # Target Groups Checkbox list row
             try:
                 import core.state as cs
-                cached = await asyncio.to_thread(cs.get_cached_groups)
-                db_groups = [(int(g["id"]), g["title"]) for g in cached]
+                db_groups = await self.fetch_live_group_choices(force=False)
+                if not db_groups:
+                    cached = await asyncio.to_thread(cs.get_cached_groups)
+                    db_groups = [(int(g["id"]), g["title"]) for g in cached]
                 
                 active_gids = {g.strip() for g in (cfg.target_groups or "").split(",") if g.strip()}
                 
@@ -757,7 +825,7 @@ class GuardApp(App):
                     val = gid_str in active_gids
                     if val:
                         matched_gids.add(gid_str)
-                    check_id = f"grp_check_{gid_str.replace('-', 'neg')}"
+                    check_id = f"target_group_{gid_str.replace('-', 'neg')}"
                     container.mount(Checkbox(label=f"{title} ({gid})", value=val, id=check_id))
                     
                 # Put custom/fallback target IDs that aren't matched in the checkboxes into the Custom input field
@@ -925,6 +993,11 @@ class GuardApp(App):
                 h_hours_select.value = curr_h_hours
             else:
                 h_hours_select.value = "24"
+
+            curr_h_max = str(getattr(cfg, "history_max_messages", 500) or "500").strip()
+            h_max_select = self.query_one("#setting-history-max-messages", Select)
+            valid_h_max = ["100", "500", "1000", "2000"]
+            h_max_select.value = curr_h_max if curr_h_max in valid_h_max else "500"
                 
             curr_fn_fmt = str(cfg.filename_format or "datetime").strip()
             fn_fmt_select = self.query_one("#setting-filename-format", Select)
@@ -969,7 +1042,7 @@ class GuardApp(App):
                 for chk in container.query(Checkbox):
                     if chk.value:
                         chk_id = chk.id
-                        gid_str = chk_id.replace("grp_check_", "").replace("neg", "-")
+                        gid_str = chk_id.replace("target_group_", "").replace("neg", "-")
                         checked_gids.append(gid_str)
             except Exception as chk_ex:
                 logging.getLogger("guard").warning(f"Failed to read target group checkboxes during save: {chk_ex}")
@@ -1039,6 +1112,9 @@ class GuardApp(App):
             
             history_hours_val = self.query_one("#setting-history-hours", Select).value
             history_hours = str(history_hours_val).strip() if (history_hours_val and str(history_hours_val) != "Select.BLANK" and history_hours_val != getattr(Select, "BLANK", None)) else "24"
+
+            history_max_val = self.query_one("#setting-history-max-messages", Select).value
+            history_max_messages = str(history_max_val).strip() if (history_max_val and str(history_max_val) != "Select.BLANK" and history_max_val != getattr(Select, "BLANK", None)) else "500"
             
             filename_format_val = self.query_one("#setting-filename-format", Select).value
             filename_format = str(filename_format_val).strip() if (filename_format_val and str(filename_format_val) != "Select.BLANK" and filename_format_val != getattr(Select, "BLANK", None)) else "datetime"
@@ -1090,6 +1166,7 @@ class GuardApp(App):
             set_key(".env", "SHOW_ETA", "true" if show_eta else "false")
             set_key(".env", "HISTORY_ENABLED", "true" if history_enabled else "false")
             set_key(".env", "HISTORY_HOURS", history_hours)
+            set_key(".env", "HISTORY_MAX_MESSAGES", history_max_messages)
             set_key(".env", "HISTORY_MODE", history_mode)
             set_key(".env", "HISTORY_REVERSE", history_reverse)
             set_key(".env", "FILENAME_FORMAT", filename_format)
@@ -1139,6 +1216,7 @@ class GuardApp(App):
             
             self.query_one("#setting-history-enabled", Switch).value = False
             self.query_one("#setting-history-hours", Select).value = "24"
+            self.query_one("#setting-history-max-messages", Select).value = "500"
             self.query_one("#setting-history-mode", Select).value = "list"
             self.query_one("#setting-history-reverse", Select).value = "true"
             self.query_one("#setting-filename-format", Select).value = "datetime"
@@ -1382,6 +1460,10 @@ class GuardApp(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "setting-raw-file-select":
             self.load_raw_file_to_ui()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if event.checkbox.id and event.checkbox.id.startswith("target_group_"):
+            self.persist_target_groups_from_ui(notify=True)
 
     def load_raw_file_to_ui(self) -> None:
         try:

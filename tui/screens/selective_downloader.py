@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, VerticalScroll, Container
-from textual.widgets import Label, Button, Input, Select, Checkbox
+from textual.widgets import Label, Button, Input, Select
 
 class SelectiveDownloaderContainer(VerticalScroll):
     """Container holding the interactive history media browser and selective downloader."""

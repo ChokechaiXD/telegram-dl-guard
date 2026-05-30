@@ -20,6 +20,7 @@ filename_format: "datetime"
 history:
   enabled: false
   hours: 24           # Scan last N hours (max 48)
+  max_messages: 500   # Per-group scan cap for low-end machines
   mode: "list"        # "list" = show list & let user choose | "auto" = download all new
   reverse: true       # true = oldest first, false = newest first
 

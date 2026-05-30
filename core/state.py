@@ -5,7 +5,6 @@ Provides direct callback logging and active download status sharing in memory.
 """
 from __future__ import annotations
 
-import os
 import json
 import sqlite3
 import logging
@@ -99,7 +98,6 @@ _conn = _get_conn()
 
 def run_auto_migration() -> None:
     """Read legacy JSON state files, migrate them to SQLite, and safely remove the JSONs."""
-    global _conn
     if not (_PROCESSED_IDS_JSON.exists() or _GROUP_CACHE_JSON.exists() or _TRACKER_JSON.exists()):
         return
     with _db_lock:
@@ -188,7 +186,6 @@ run_auto_migration()
 
 def load_state() -> tuple[OrderedDict[int, bool], dict[int, str]]:
     """Return *(processed_ids, group_cache)* loaded from SQLite."""
-    global _conn
     processed_ids: OrderedDict[int, bool] = OrderedDict()
     group_cache: dict[int, str] = {}
     
@@ -212,7 +209,6 @@ def load_state() -> tuple[OrderedDict[int, bool], dict[int, str]]:
 
 def persist_state(processed_ids: OrderedDict[int, bool], group_cache: dict[int, str]) -> None:
     """Persist processed_ids and group_cache into SQLite."""
-    global _conn
     with _db_lock:
         try:
             now_str = datetime.now().isoformat()
@@ -346,7 +342,6 @@ class HashCache:
 
 
 def is_uploaded(filepath: str) -> bool:
-    global _conn
     with _db_lock:
         try:
             k = str(Path(filepath).resolve())
@@ -359,7 +354,6 @@ def is_uploaded(filepath: str) -> bool:
 
 
 def is_hash_exists(file_hash: str) -> bool:
-    global _conn
     if not file_hash:
         return False
     with _db_lock:
@@ -372,7 +366,6 @@ def is_hash_exists(file_hash: str) -> bool:
 
 
 def is_phash_exists(p_hash: str) -> bool:
-    global _conn
     if not p_hash:
         return False
     with _db_lock:
@@ -388,7 +381,6 @@ def get_phash_match(p_hash: str, max_distance: int = 3) -> str | None:
     """Find a similar photo in the database based on Hamming distance.
     Returns the filepath of the matched record if found, else None.
     """
-    global _conn
     if not p_hash:
         return None
     with _db_lock:
@@ -409,7 +401,6 @@ def get_phash_match(p_hash: str, max_distance: int = 3) -> str | None:
 
 
 def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = None, p_hash: str | None = None) -> None:
-    global _conn
     with _db_lock:
         try:
             k = str(Path(filepath).resolve())
@@ -436,7 +427,6 @@ def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = No
 
 
 def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str = "unknown", caption: str = "", file_hash: str | None = None, p_hash: str | None = None) -> None:
-    global _conn
     with _db_lock:
         try:
             k = str(Path(filepath).resolve())
@@ -463,7 +453,6 @@ def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str 
 
 
 def get_pending() -> list[str]:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("SELECT filepath FROM download_tracker WHERE uploaded = 0")
@@ -474,7 +463,6 @@ def get_pending() -> list[str]:
 
 
 def get_pending_details() -> list[dict]:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("SELECT filepath, sender_name, source_group, original_caption, size, file_hash FROM download_tracker WHERE uploaded = 0")
@@ -496,7 +484,6 @@ def get_pending_details() -> list[dict]:
 
 
 def get_uploaded() -> list[dict]:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("SELECT filepath, filename, size, storage_msg_id, uploaded_at, file_hash FROM download_tracker WHERE uploaded = 1")
@@ -516,8 +503,37 @@ def get_uploaded() -> list[dict]:
             return []
 
 
+def get_uploaded_existing_candidates(limit: int = 200) -> list[dict]:
+    limit = max(1, int(limit))
+    with _db_lock:
+        try:
+            cursor = _conn.execute(
+                """
+                SELECT filepath, filename, size, storage_msg_id, uploaded_at, file_hash
+                FROM download_tracker
+                WHERE uploaded = 1
+                ORDER BY uploaded_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    "filepath": row[0],
+                    "filename": row[1],
+                    "size": row[2],
+                    "storage_msg_id": row[3],
+                    "uploaded_at": row[4],
+                    "file_hash": row[5] or ""
+                })
+            return results
+        except Exception as e:
+            log.error("SQLite get_uploaded_existing_candidates failed: %s", e)
+            return []
+
+
 def remove_entry(filepath: str) -> None:
-    global _conn
     with _db_lock:
         try:
             k = str(Path(filepath).resolve())
@@ -528,7 +544,6 @@ def remove_entry(filepath: str) -> None:
 
 
 def cleanup_missing() -> int:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("SELECT filepath FROM download_tracker")
@@ -549,7 +564,6 @@ def cleanup_missing() -> int:
 
 def scan_downloads(download_dir: str = "downloads") -> list[dict]:
     """Scan downloads directory and sync database records, auto-registering untracked files as pending."""
-    global _conn
     dl_path = Path(download_dir)
     results = []
     if not dl_path.exists():
@@ -579,11 +593,9 @@ def scan_downloads(download_dir: str = "downloads") -> list[dict]:
                         """, (k, f.name, stat.st_size))
                         uploaded = False
                         storage_msg_id = None
-                        uploaded_at = None
                     else:
                         uploaded = bool(row[0] == 1)
                         storage_msg_id = row[1]
-                        uploaded_at = row[2]
 
                     results.append({
                         "filepath": k,
@@ -600,7 +612,6 @@ def scan_downloads(download_dir: str = "downloads") -> list[dict]:
 
 
 def get_all() -> list[dict]:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("SELECT filepath, filename, size, uploaded, uploaded_at, storage_msg_id, file_hash FROM download_tracker")
@@ -622,7 +633,6 @@ def get_all() -> list[dict]:
 
 
 def get_stats() -> dict:
-    global _conn
     with _db_lock:
         try:
             cursor = _conn.execute("""
@@ -655,7 +665,6 @@ def purge_old_records(msg_days: int = 7, tracker_days: int = 30) -> dict:
     Returns:
         Dict with counts of purged rows.
     """
-    global _conn
     cutoff_msg = (datetime.now() - timedelta(days=msg_days)).isoformat()
     cutoff_tracker = (datetime.now() - timedelta(days=tracker_days)).isoformat()
     purged = {"messages": 0, "tracker": 0}
@@ -685,7 +694,6 @@ def purge_old_records(msg_days: int = 7, tracker_days: int = 30) -> dict:
 
 def get_mime_type_stats() -> dict[str, int]:
     """Calculate file count metrics grouped by MIME-type categories using optimized SQL queries."""
-    global _conn
     stats = {"photo": 0, "video": 0, "doc": 0, "other": 0}
     with _db_lock:
         try:
@@ -722,7 +730,6 @@ def get_mime_type_stats() -> dict[str, int]:
 
 def get_daily_stats_last_7_days() -> list[tuple[str, int, int]]:
     """Return historical volume metrics (date, count, size_bytes) for the last week, optimized by range filtering."""
-    global _conn
     results = []
     from datetime import date, timedelta
     dates = [(date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
@@ -750,7 +757,6 @@ def get_daily_stats_last_7_days() -> list[tuple[str, int, int]]:
 
 def get_cached_groups() -> list[dict[str, str]]:
     """Return all cached groups from SQLite cache."""
-    global _conn
     results = []
     with _db_lock:
         try:
@@ -764,7 +770,6 @@ def get_cached_groups() -> list[dict[str, str]]:
 
 def save_cached_groups(groups: list[tuple[int, str]]) -> None:
     """Save group caches in bulk to SQLite cache in a thread-safe manner, clearing old entries first."""
-    global _conn
     with _db_lock:
         try:
             with _conn:
@@ -777,7 +782,6 @@ def save_cached_groups(groups: list[tuple[int, str]]) -> None:
 
 def get_group_title(group_id: str | int) -> str | None:
     """Resolve a group's title from group cache or tracker history."""
-    global _conn
     gid_int = None
     gid_str = str(group_id)
     try:
@@ -802,4 +806,3 @@ def get_group_title(group_id: str | int) -> str | None:
         except Exception as e:
             log.error("Failed to resolve group title from DB: %s", e)
     return None
-

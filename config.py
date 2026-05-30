@@ -14,7 +14,8 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-load_dotenv()
+_ENV_PATH = Path(".env")
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
 _logger = logging.getLogger("guard.config")
 
@@ -103,6 +104,7 @@ class AppConfig:
     history_hours: int = 24
     history_mode: str = "list"
     history_reverse: bool = True
+    history_max_messages: int = 500
 
     # Queue
     queue_size: int = 3
@@ -141,6 +143,7 @@ class AppConfig:
     @classmethod
     def load(cls) -> AppConfig:
         global _CFG
+        load_dotenv(dotenv_path=_ENV_PATH, override=True)
         _CFG = _load_yaml()
         return cls(
             api_id=_safe_int(_get("API_ID", "api_id", 0)),
@@ -159,6 +162,7 @@ class AppConfig:
             history_hours=_safe_int(_get("HISTORY_HOURS", "history.hours", 24)),
             history_mode=_get("HISTORY_MODE", "history.mode", "list"),
             history_reverse=_get_bool("HISTORY_REVERSE", "history.reverse", True),
+            history_max_messages=max(1, _safe_int(_get("HISTORY_MAX_MESSAGES", "history.max_messages", 500), 500)),
             queue_size=_safe_int(_get("QUEUE_SIZE", "download.max_concurrent", 3), 3),
             cleanup_enabled=_get_bool("CLEANUP_ENABLED", "cleanup.enabled", False),
             cleanup_retention_days=_safe_int(_get("CLEANUP_RETENTION_DAYS", "cleanup.retention_days", 30), 30),

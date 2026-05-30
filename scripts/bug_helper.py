@@ -5,10 +5,7 @@ Implements the 10 software testing prompts directly against the project log file
 """
 from __future__ import annotations
 
-import os
 import re
-import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -166,13 +163,13 @@ def show_diagnostics(err: dict[str, Any]) -> None:
     print("-" * 60)
     print(f"[Prompt 1] Severity Classification: {diag['severity'].upper()}")
     print()
-    print(f"[Prompt 7] Explanation in Plain Language:")
+    print("[Prompt 7] Explanation in Plain Language:")
     print(f"  {diag['explanation']}")
     print()
-    print(f"[Prompt 2] Likely Root Cause:")
+    print("[Prompt 2] Likely Root Cause:")
     print(f"  {diag['root_cause']}")
     print()
-    print(f"[Prompt 8] Recommended Investigation & Resolution Steps:")
+    print("[Prompt 8] Recommended Investigation & Resolution Steps:")
     for line in diag["steps"].split("\n"):
         print(f"  {line}")
     print()

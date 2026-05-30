@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from config import AppConfig
-from core.state import remove_entry, get_uploaded, purge_old_records, is_uploaded
+from core.state import remove_entry, get_uploaded_existing_candidates, purge_old_records, is_uploaded
 
 log = logging.getLogger("guard.cleanup")
 
@@ -108,7 +108,7 @@ async def _aggressive_uploaded_cleanup_task() -> None:
             do_delete = os.getenv("UPLOAD_ENABLED", "false") == "true" and upload_mode.endswith("_delete")
             
             if do_delete:
-                uploaded_entries = get_uploaded()
+                uploaded_entries = get_uploaded_existing_candidates(limit=200)
                 removed = 0
                 for entry in uploaded_entries:
                     p = Path(entry["filepath"])

@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
 import time
 import socket
 import asyncio
 import logging
 import webbrowser
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +24,10 @@ from listener import _do_download
 from core.download_handler import _mtype, _media_name, _resolve_sender_info
 import core.download_handler as dh
 from core.utils import format_bytes, setup_logging
+from services.forwarding import forward_or_upload, summarize_forward_results
+from services.group_sync import fetch_group_choices, to_api_rows, to_cache_rows
+from services.paths import build_transfer_path
+from uploader import upload_single
 
 # Setup Logging
 setup_logging(level="INFO")
@@ -55,7 +58,7 @@ async def lifespan(app: FastAPI):
     # Initialize download_handler globals to prevent NoneType attribute errors in _do_download
     dh.CFG = cfg
     dh.DL_DIR = Path(cfg.download_dir)
-    dh.DL_SEM = asyncio.Semaphore(max(cfg.queue_size, 10))
+    dh.DL_SEM = asyncio.Semaphore(max(1, min(cfg.queue_size, 10)))
     
     if not cfg.session_string:
         log.error("Telegram session string not found in .env. Please run Setup Wizard first.")
@@ -101,13 +104,13 @@ async def lifespan(app: FastAPI):
         background_tasks.add(upload_task)
         upload_task.add_done_callback(background_tasks.discard)
 
-    # Open default browser automatically
-    def open_browser():
-        time.sleep(1.5)
-        webbrowser.open(f"http://localhost:{PORT}")
-        
-    import threading
-    threading.Thread(target=open_browser, daemon=True).start()
+    if os.getenv("WEB_AUTO_OPEN", "false").lower() in ("1", "true", "yes", "on"):
+        def open_browser():
+            time.sleep(1.5)
+            webbrowser.open(f"http://localhost:{PORT}")
+
+        import threading
+        threading.Thread(target=open_browser, daemon=True).start()
 
     yield
 
@@ -126,32 +129,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def add_no_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") or request.url.path in ("/", "/index.html", "/app.js", "/style.css"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 # --- API Endpoints ---
 
+async def _fetch_and_cache_groups() -> list[dict[str, str]]:
+    if not client:
+        raise HTTPException(status_code=500, detail="Telegram client not initialized.")
+
+    try:
+        log.info("Fetching live dialogs from Telegram...")
+        groups = await fetch_group_choices(client)
+        cs.save_cached_groups(to_cache_rows(groups))
+        return to_api_rows(groups)
+    except Exception as e:
+        log.error(f"Failed to fetch live dialogs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch channels from Telegram.")
+
 @app.get("/api/groups")
-async def get_groups():
+async def get_groups(refresh: bool = False):
     """Load groups from SQLite cache. If empty, sync and cache dialogs on the fly."""
     if not client:
         raise HTTPException(status_code=500, detail="Telegram client not initialized.")
-        
+
+    if refresh:
+        return JSONResponse(content=await _fetch_and_cache_groups())
+
     groups = cs.get_cached_groups()
     
     # If cache is empty, query live dialogs and populate cache
     if not groups:
-        try:
-            log.info("Group cache is empty. Fetching live dialogs from Telegram...")
-            live_dialogs = [d async for d in client.iter_dialogs() if d.is_group or d.is_channel]
-            
-            # Persist to SQLite using centralized helper
-            groups_to_save = [(g.id, g.title or "Untitled") for g in live_dialogs]
-            cs.save_cached_groups(groups_to_save)
-            
-            groups = [{"id": str(g[0]), "title": g[1]} for g in groups_to_save]
-        except Exception as e:
-            log.error(f"Failed to fetch live dialogs: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch channels from Telegram.")
+        return JSONResponse(content=await _fetch_and_cache_groups())
             
     return JSONResponse(content=groups)
+
+@app.post("/api/groups/sync")
+async def sync_groups():
+    """Force-refresh group/channel cache from Telegram dialogs."""
+    groups = await _fetch_and_cache_groups()
+    return JSONResponse(content={"status": "ok", "groups": groups, "count": len(groups)})
 
 @app.get("/api/history/{group_id}")
 async def get_history(group_id: str, limit: int = 100, q: str = None, type: str = "all"):
@@ -405,20 +426,16 @@ async def bulk_download(req: BulkDownloadRequest):
         fname = _media_name(msg.media, msg.date, msg.id)
         fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
         
-        # Build path based on date folder structure
-        date_folder = msg.date.strftime(cfg.folder_date_format) if msg.date else "manual_download"
-        target_dir = ddir / date_folder
-        fpath = target_dir / fname
+        fpath = build_transfer_path(ddir, group_title, sender, fname)
         
         caption = msg.message or ""
         album_group = getattr(msg, "grouped_id", None)
         
         # Spawn _do_download in the background safely
         task = asyncio.create_task(_do_download(
-            client, msg, fpath, target_dir, mt, sender, username,
+            client, msg, fpath, fpath.parent, mt, sender, username,
             group_title, caption, album_group, fsize,
-            cs.UPLOAD_QUEUE, cfg.dedup_method, cfg.show_speed,
-            priority=True # Manual downloads get immediate priority
+            cs.UPLOAD_QUEUE, cfg.dedup_method, cfg.show_speed
         ))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
@@ -458,13 +475,31 @@ async def bulk_forward(req: BulkForwardRequest):
         raise HTTPException(status_code=404, detail="Could not resolve source or storage group entity.")
         
     try:
-        forwarded = await client.forward_messages(storage_entity, req.message_ids, source_entity)
-        if isinstance(forwarded, list):
-            success_count = sum(1 for m in forwarded if m is not None)
-        else:
-            success_count = 1 if forwarded is not None else 0
-            
-        return JSONResponse(content={"status": "ok", "forwarded_items": success_count})
+        messages = await client.get_messages(source_entity, ids=req.message_ids)
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        results = []
+        for msg in messages:
+            if not msg or not msg.media:
+                results.append({"mode": "missing", "message_id": None})
+                continue
+            caption = (getattr(msg, "message", None) or "").strip()
+            results.append(await forward_or_upload(
+                client,
+                source_entity,
+                storage_entity,
+                msg,
+                upload_single,
+                caption,
+                storage_upload_target=storage_id,
+            ))
+
+        summary = summarize_forward_results(results)
+        return JSONResponse(content={
+            "status": "ok",
+            **summary,
+        })
     except Exception as e:
         log.error(f"Failed to forward messages: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to forward messages: {str(e)}")

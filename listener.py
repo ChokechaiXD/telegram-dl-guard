@@ -16,17 +16,16 @@ import zipfile
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from telethon import TelegramClient, events
-from telethon.errors import AuthKeyDuplicatedError, FloodWaitError, TimedOutError
+from telethon.errors import AuthKeyDuplicatedError, ChatForwardsRestrictedError, FloodWaitError, TimedOutError
 from telethon.sessions import StringSession
 
 from config import AppConfig
 from core.cleanup import _cleanup_task, _aggressive_uploaded_cleanup_task
 import core.download_handler as dh
 from core.download_handler import (
-    _cfg, _extract_peer_id, _file_hash, _file_hash_async, _dhash_async,
+    _cfg, _extract_peer_id, _file_hash_async, _dhash_async,
     _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir, compute_priority_key,
@@ -38,15 +37,40 @@ from core.state import (
 )
 from core.utils import sanitize_group, format_bytes
 from core.commands import CommandHandler
-from uploader import upload_worker
+from services.album_buffer import AlbumBuffer
+from services.engine_config import EngineConfig
+from services.forwarding import upload_protected_media
+from services.paths import build_transfer_dir, build_transfer_path
+from uploader import upload_single, upload_worker
 
 log = logging.getLogger("guard.listener")
 _MAX_PROCESSED = 50000
 MAX_PENDING = 50  # hard limit for fire-and-forget download tasks
 _pending_tasks: set[asyncio.Task] = set()
-ALBUM_BUFFER: dict[int, dict[str, Any]] = {}
+ALBUM_BUFFER = AlbumBuffer(delay=1.5)
 FORWARD_LOCK = asyncio.Lock()
 _last_forward_time = 0.0
+
+
+async def _protected_forward_fallback(
+    client: TelegramClient,
+    msg,
+    storage_id: int,
+    caption: str = "",
+) -> int | None:
+    """Fallback for protected chats that disallow Telegram-side forwarding."""
+    try:
+        result = await upload_protected_media(client, storage_id, msg, upload_single, caption)
+        msg_id = result.get("message_id")
+        if not msg_id:
+            log.error("Protected forward fallback failed for message %s", getattr(msg, "id", "?"))
+            return None
+        log.info("Protected forward fallback uploaded message %s as storage message %s", getattr(msg, "id", "?"), msg_id)
+        GLOBAL_STATUS["today_uploaded"] += 1
+        return int(msg_id)
+    except Exception as e:
+        log.error("Protected forward fallback failed for message %s: %s", getattr(msg, "id", "?"), e)
+        return None
 
 
 # Dedup cache
@@ -145,7 +169,8 @@ async def _do_download(
 ) -> bool:
     # Throttle download if active uploads backlog is too large to prevent local disk build-up
     if upload_queue is not None:
-        while len(ACTIVE_UPLOADS) >= 5:
+        max_upload_backlog = max(1, min(getattr(dh.CFG, "upload_workers", 3), 5) * 2)
+        while len(ACTIVE_UPLOADS) >= max_upload_backlog:
             await asyncio.sleep(0.5)
 
     async with dh.DL_SEM:
@@ -228,7 +253,7 @@ async def _do_download(
                                     return True
                                 _hashes.put(fh, str(fpath))
 
-                        if mt == "photo":
+                        if getattr(dh.CFG, "dedup_enabled", True) and dedup_method == "hash" and mt == "photo":
                             ph = await _dhash_async(fpath)
                             if ph:
                                 match_path = get_phash_match(ph, max_distance=3)
@@ -306,8 +331,11 @@ async def run(provided_client: TelegramClient | None = None) -> None:
     GLOBAL_STATUS["uptime_start"] = time.time()
 
     dh.CFG = AppConfig.load()
-    dh.DL_DIR = Path(dh.CFG.download_dir)
-    dh.DL_SEM = asyncio.Semaphore(max(dh.CFG.queue_size, 10))
+    engine_cfg = EngineConfig.from_app_config(dh.CFG)
+    dh.DL_DIR = Path(engine_cfg.download_dir)
+    download_slots = engine_cfg.queue_size
+    max_pending_tasks = max(5, download_slots * 2)
+    dh.DL_SEM = asyncio.Semaphore(download_slots)
     CFG = dh.CFG
     DL_DIR = dh.DL_DIR
 
@@ -322,9 +350,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
     dh._group_name_cache = _group_name_cache
 
     # Filters
-    media_set = {t.strip() for t in CFG.media_types.split(",") if t.strip()}
-    blocked = [s.strip().lower() for s in CFG.blocked_senders.split(",") if s.strip()] if CFG.blocked_senders else []
-
+    media_set = {t.strip() for t in engine_cfg.media_types.split(",") if t.strip()}
     # Client Setup
     if provided_client is not None:
         client = provided_client
@@ -336,12 +362,12 @@ async def run(provided_client: TelegramClient | None = None) -> None:
         )
 
     peer_ids: set[int] = set()
-    if CFG.target_groups:
+    if engine_cfg.target_groups:
         if provided_client is None:
             if not await connect_retry(client):
                 GLOBAL_STATUS["running"] = False
                 return
-        peer_ids = await _resolve_peer_ids(client, CFG.target_groups)
+        peer_ids = await _resolve_peer_ids(client, engine_cfg.target_groups)
 
     if not peer_ids:
         print("  No valid groups.")
@@ -358,7 +384,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
         try:
             storage_gid = int(CFG.storage_group_id)
             upload_mode = os.getenv("UPLOAD_MODE", "realtime_keep")
-            upload_workers = max(1, min(CFG.upload_workers, 5))
+            upload_workers = engine_cfg.upload_workers
             upload_task = asyncio.create_task(upload_worker(client, storage_gid, upload_queue, upload_mode, upload_workers))
             print(f"  Upload: {upload_mode} -> {storage_gid} (workers={upload_workers})")
             
@@ -452,22 +478,11 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                 payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
                 await upload_queue.put((pkey, msg.id, payload))
 
-    async def _flush_album_after_delay(grouped_id: int, delay: float) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return
-        album_data = ALBUM_BUFFER.pop(grouped_id, None)
-        if not album_data:
-            return
-
-        msgs = album_data["messages"]
-        event = album_data["event"]
+    async def _flush_album_after_delay(grouped_id: int) -> None:
+        msgs, event = ALBUM_BUFFER.pop_sorted(grouped_id)
         if not msgs:
             return
 
-        # Sort messages sequentially to preserve chronological ordering
-        msgs.sort(key=lambda m: m.id)
         first_msg = msgs[0]
 
         if _cmd_handler.is_paused() or GLOBAL_STATUS["paused"]:
@@ -501,6 +516,15 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                         _last_forward_time = time.time()
                         await client.forward_messages(storage_entity, to_forward, source_entity)
                 return
+            except ChatForwardsRestrictedError:
+                log.warning("Instant Album Forward blocked by source protection. Falling back to download+upload.")
+                ok_count = 0
+                for msg in msgs:
+                    caption = (getattr(msg, "message", None) or "").strip()
+                    if await _protected_forward_fallback(client, msg, storage_id, caption):
+                        ok_count += 1
+                log.info("Protected album fallback uploaded %d/%d items", ok_count, len(msgs))
+                return
             except Exception as fe:
                 log.error(f"Instant Album Forward failed: {fe}")
                 return
@@ -516,7 +540,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
 
         sender, username, group_name, _, _ = r
         original_caption = (getattr(first_msg, "message", None) or "").strip()
-        ddir = Path(dh.CFG.download_dir) / sanitize_group(group_name) / sender
+        ddir = build_transfer_dir(dh.CFG.download_dir, group_name, sender)
         _ensure_dir(ddir)
 
         # Collect download tasks for all messages in the album
@@ -629,23 +653,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
         if grouped_id is not None:
             if msg.id in processed:
                 return
-            if grouped_id not in ALBUM_BUFFER:
-                ALBUM_BUFFER[grouped_id] = {
-                    "messages": [msg],
-                    "event": event,
-                    "task": None
-                }
-            else:
-                if msg.id not in [m.id for m in ALBUM_BUFFER[grouped_id]["messages"]]:
-                    ALBUM_BUFFER[grouped_id]["messages"].append(msg)
-            
-            # Debounce: Cancel previous scheduled flush to extend the sliding window
-            old_task = ALBUM_BUFFER[grouped_id].get("task")
-            if old_task and not old_task.done():
-                old_task.cancel()
-                
-            new_task = asyncio.create_task(_flush_album_after_delay(grouped_id, 1.5))
-            ALBUM_BUFFER[grouped_id]["task"] = new_task
+            ALBUM_BUFFER.add(grouped_id, msg, event, _flush_album_after_delay)
             return
 
         if msg.id in processed:
@@ -662,6 +670,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
         if r is None:
             return
         sender, username, group_name, mt, file_size = r
+        original_caption = (getattr(msg, "message", None) or "").strip()
 
         if getattr(dh.CFG, "processing_mode", "download") == "forward":
             if not getattr(dh.CFG, "storage_group_id", None):
@@ -680,14 +689,18 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                     _last_forward_time = time.time()
                     await client.forward_messages(storage_entity, msg.id, source_entity)
                 return
+            except ChatForwardsRestrictedError:
+                log.warning("Instant Single Forward blocked by source protection. Falling back to download+upload.")
+                if not await _protected_forward_fallback(client, msg, storage_id, original_caption):
+                    GLOBAL_STATUS["today_failed"] += 1
+                return
             except Exception as fe:
                 log.error(f"Instant Single Forward failed: {fe}")
                 return
 
         # Build download path
         fname = _media_name(msg.media, msg.date, msg.id)
-        fpath = Path(dh.CFG.download_dir) / _sanitize_group(group_name) / sender / fname
-        original_caption = (getattr(msg, "message", None) or "").strip()
+        fpath = build_transfer_path(dh.CFG.download_dir, group_name, sender, fname)
 
         fpath = _resolve_download_path(fpath, file_size or None, msg.id)
         if fpath is None:
@@ -696,9 +709,9 @@ async def run(provided_client: TelegramClient | None = None) -> None:
         album_group = None
 
         # Fire-and-forget with pending task limiter
-        if len(_pending_tasks) >= MAX_PENDING:
+        if len(_pending_tasks) >= max_pending_tasks:
             done, _ = await asyncio.wait(_pending_tasks, return_when=asyncio.FIRST_COMPLETED)
-            _pending_tasks -= done
+            _pending_tasks.difference_update(done)
         task = asyncio.create_task(_do_download(
             client, msg, fpath, fpath.parent, mt, sender, username,
             group_name, original_caption, album_group, file_size,

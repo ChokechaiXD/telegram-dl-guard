@@ -185,6 +185,23 @@ python run.py setup     # First-time session setup
 
 Configuration uses a layered system: `.env` (secrets, highest priority) → `config.yaml` (defaults).
 
+### Runtime Modes
+
+- `download`: listens to `TARGET_GROUPS`, downloads matching media to `DOWNLOAD_DIR`, and optionally queues uploads when `UPLOAD_ENABLED=true`.
+- `forward`: forwards messages to `STORAGE_GROUP_ID` through Telegram first. If Telegram blocks forwarding for protected chats, the app falls back to download and upload.
+- `lite`: low-end profile. Use `QUEUE_SIZE=1`, `UPLOAD_WORKERS=1`, `DEDUP_METHOD=size`, `HISTORY_ENABLED=false`, and `WEB_AUTO_OPEN=false`.
+
+### Restart Required Settings
+
+These values are read when the listener engine starts. Restart the listener after changing them:
+
+- `TARGET_GROUPS`
+- `QUEUE_SIZE`
+- `UPLOAD_WORKERS`
+- `PROCESSING_MODE`
+
+Most display and cleanup settings can be reloaded during runtime, but restart when in doubt. The listener startup snapshot is the source of truth for active peer filters and worker counts.
+
 ### config.yaml
 
 ```yaml
@@ -203,6 +220,7 @@ dedup:
 history:
   enabled: false
   hours: 24                         # Scan last N hours
+  max_messages: 500                 # Per-group scan cap
   mode: "list"                      # "list" = interactive | "auto" = download all
   reverse: true                     # true = oldest first
 
@@ -253,6 +271,7 @@ All `config.yaml` keys can be overridden via environment variables:
 | `UPLOAD_ENABLED` | Auto-upload toggle | `false` |
 | `STORAGE_GROUP_ID` | Upload destination | — |
 | `UPLOAD_WORKERS` | Concurrent uploads | `3` |
+| `HISTORY_MAX_MESSAGES` | Max history messages scanned per group | `500` |
 | `SUPER_GRABBER_MODE` | Bypass all filters | `false` |
 | `CLEANUP_ENABLED` | Periodic cleanup | `false` |
 | `LOG_LEVEL` | `DEBUG/INFO/WARNING/ERROR` | `INFO` |

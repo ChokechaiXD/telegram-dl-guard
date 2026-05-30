@@ -26,7 +26,7 @@ from telethon.tl.types import (
 )
 
 from core.state import is_uploaded, mark_uploaded, mark_pending, ACTIVE_UPLOADS, GLOBAL_STATUS
-from core.download_handler import _file_hash, _file_hash_async
+from core.download_handler import _file_hash_async
 from core.utils import format_bytes, detect_send_type, guess_mime
 
 log = logging.getLogger("guard.uploader")
