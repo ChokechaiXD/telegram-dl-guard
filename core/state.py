@@ -420,10 +420,16 @@ def mark_uploaded(filepath: str, storage_msg_id: int, file_hash: str | None = No
             
             with _conn:
                 _conn.execute("""
-                    INSERT OR REPLACE INTO download_tracker 
+                    INSERT INTO download_tracker 
                     (filepath, filename, size, uploaded, storage_msg_id, uploaded_at, file_hash, p_hash)
-                    VALUES (?, ?, ?, 1, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)), COALESCE(?, (SELECT p_hash FROM download_tracker WHERE filepath = ?)))
-                """, (k, filename, size, storage_msg_id, now_str, file_hash, k, p_hash, k))
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?)
+                    ON CONFLICT(filepath) DO UPDATE SET
+                        uploaded = 1,
+                        storage_msg_id = excluded.storage_msg_id,
+                        uploaded_at = excluded.uploaded_at,
+                        file_hash = COALESCE(excluded.file_hash, file_hash),
+                        p_hash = COALESCE(excluded.p_hash, p_hash)
+                """, (k, filename, size, storage_msg_id, now_str, file_hash, p_hash))
             log.info(f"upload_tracker SQLite: marked uploaded: {filename}")
         except Exception as e:
             log.error("SQLite mark_uploaded failed: %s", e)
@@ -440,10 +446,18 @@ def mark_pending(filepath: str, source_group: str = "unknown", sender_name: str 
             
             with _conn:
                 _conn.execute("""
-                    INSERT OR REPLACE INTO download_tracker 
+                    INSERT INTO download_tracker 
                     (filepath, filename, size, uploaded, source_group, sender_name, original_caption, file_hash, p_hash)
-                    VALUES (?, ?, ?, 0, ?, ?, ?, COALESCE(?, (SELECT file_hash FROM download_tracker WHERE filepath = ?)), COALESCE(?, (SELECT p_hash FROM download_tracker WHERE filepath = ?)))
-                """, (k, filename, size, source_group, sender_name, caption, file_hash, k, p_hash, k))
+                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
+                    ON CONFLICT(filepath) DO UPDATE SET
+                        size = excluded.size,
+                        uploaded = 0,
+                        source_group = excluded.source_group,
+                        sender_name = excluded.sender_name,
+                        original_caption = excluded.original_caption,
+                        file_hash = COALESCE(excluded.file_hash, file_hash),
+                        p_hash = COALESCE(excluded.p_hash, p_hash)
+                """, (k, filename, size, source_group, sender_name, caption, file_hash, p_hash))
         except Exception as e:
             log.error("SQLite mark_pending failed: %s", e)
 
@@ -760,7 +774,7 @@ def save_cached_groups(groups: list[tuple[int, str]]) -> None:
 
 
 def get_group_title(group_id: str | int) -> str | None:
-    """Resolve a group's title from tracker history or group cache."""
+    """Resolve a group's title from group cache or tracker history."""
     global _conn
     gid_int = None
     gid_str = str(group_id)
@@ -771,18 +785,18 @@ def get_group_title(group_id: str | int) -> str | None:
     
     with _db_lock:
         try:
-            # 1. Try resolving from tracker history using source_group text
-            cursor = _conn.execute("SELECT source_group FROM download_tracker WHERE source_group = ? OR source_group = ? LIMIT 1", (gid_str, f"Group ID: {gid_str}"))
-            row = cursor.fetchone()
-            if row and row[0] and not row[0].isdigit() and not row[0].startswith("Group ID:"):
-                return row[0]
-                
-            # 2. Try resolving from group_cache if int ID exists
+            # 1. Try resolving from group_cache if int ID exists (fast indexed lookup)
             if gid_int is not None:
                 cursor = _conn.execute("SELECT group_title FROM group_cache WHERE group_id = ?", (gid_int,))
                 row = cursor.fetchone()
                 if row:
                     return row[0]
+            
+            # 2. Try resolving from tracker history using source_group text (fallback table scan)
+            cursor = _conn.execute("SELECT source_group FROM download_tracker WHERE source_group = ? OR source_group = ? LIMIT 1", (gid_str, f"Group ID: {gid_str}"))
+            row = cursor.fetchone()
+            if row and row[0] and not row[0].isdigit() and not row[0].startswith("Group ID:"):
+                return row[0]
         except Exception as e:
             log.error("Failed to resolve group title from DB: %s", e)
     return None
