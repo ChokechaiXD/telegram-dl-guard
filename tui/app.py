@@ -263,7 +263,7 @@ class GuardApp(App):
             await asyncio.to_thread(cs.save_cached_groups, groups_to_save)
             
             # Dynamically refresh the settings checkboxes and dropdowns with the newly synced groups immediately
-            self.call_after_refresh(self.load_config_to_ui)
+            self.call_after_refresh(lambda: asyncio.create_task(self.load_config_to_ui()))
             
             self.notify("Sync complete! Group list printed in the Logs panel.", title="Groups Synced")
         except asyncio.TimeoutError:
@@ -380,7 +380,7 @@ class GuardApp(App):
         except Exception as e:
             self.notify(f"Failed to open: {e}", severity="error", title="Launcher Error")
 
-    def toggle_settings(self) -> None:
+    async def toggle_settings(self) -> None:
         dash = self.query_one("#dashboard-container")
         settings = self.query_one("#settings-container")
         gallery = self.query_one("#gallery-container")
@@ -389,7 +389,7 @@ class GuardApp(App):
             dash.styles.display = "none"
             gallery.styles.display = "none"
             settings.styles.display = "block"
-            self.load_config_to_ui()
+            await self.load_config_to_ui()
             self.title = "Telegram DL Guard Settings"
         else:
             settings.styles.display = "none"
@@ -445,7 +445,7 @@ class GuardApp(App):
             dash.styles.display = "block"
             self.title = "Telegram DL Guard Dashboard"
 
-    def toggle_selective(self) -> None:
+    async def toggle_selective(self) -> None:
         dash = self.query_one("#dashboard-container")
         settings = self.query_one("#settings-container")
         gallery = self.query_one("#gallery-container")
@@ -463,7 +463,8 @@ class GuardApp(App):
             # Populate Target Groups dropdown inside history browser screen
             try:
                 import core.state as cs
-                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
+                cached = await asyncio.to_thread(cs.get_cached_groups)
+                db_groups = [(int(g["id"]), g["title"]) for g in cached]
                 
                 options = []
                 for gid, title in db_groups:
@@ -555,7 +556,7 @@ class GuardApp(App):
         search_query = self.query_one("#selective-search-query", Input).value.strip() or None
 
         self.notify("Fetching history media... Check log panel for details.", title="History Browser")
-        logging.getLogger("guard").info(f"🔍 Fetching past {limit} messages from group ID: {group_id}...")
+        logging.getLogger("guard").info(f"Fetching past {limit} messages from group ID: {group_id}...")
 
         # Run history fetching thread-safely
         async def fetch_messages_async():
@@ -642,7 +643,7 @@ class GuardApp(App):
                 box.mount(row)
                 
             self.notify(f"Successfully fetched {len(messages)} media files!", title="History Browser")
-            logging.getLogger("guard").info(f"✨ Successfully retrieved {len(messages)} media messages from group.")
+            logging.getLogger("guard").info(f"Successfully retrieved {len(messages)} media messages from group.")
         except Exception as e:
             self.notify(f"Fetch failed: {e}", severity="error", title="History Browser")
             logging.getLogger("guard").error(f"Failed to fetch history: {e}")
@@ -664,7 +665,7 @@ class GuardApp(App):
             return
             
         self.notify(f"Queueing {len(checked_ids)} manual downloads...", title="Selective Downloader")
-        logging.getLogger("guard").info(f"📥 Queueing {len(checked_ids)} manual historical downloads...")
+        logging.getLogger("guard").info(f"Queueing {len(checked_ids)} manual historical downloads...")
         
         # Load CFG and directories
         import core.download_handler as dh
@@ -679,7 +680,7 @@ class GuardApp(App):
         
         try:
             import core.state as cs
-            group_title = cs.get_group_title(group_id_str) or group_id_str
+            group_title = (await asyncio.to_thread(cs.get_group_title, group_id_str)) or group_id_str
         except Exception:
             group_title = group_id_str
             
@@ -731,7 +732,7 @@ class GuardApp(App):
         except Exception as e:
             self.notify(f"Failed to start downloads: {e}", severity="error")
 
-    def load_config_to_ui(self) -> None:
+    async def load_config_to_ui(self) -> None:
         try:
             cfg = AppConfig.load()
             
@@ -741,7 +742,8 @@ class GuardApp(App):
             # Target Groups Checkbox list row
             try:
                 import core.state as cs
-                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
+                cached = await asyncio.to_thread(cs.get_cached_groups)
+                db_groups = [(int(g["id"]), g["title"]) for g in cached]
                 
                 active_gids = {g.strip() for g in (cfg.target_groups or "").split(",") if g.strip()}
                 
@@ -768,7 +770,8 @@ class GuardApp(App):
             # Populate Storage Group Select options from SQLite
             try:
                 import core.state as cs
-                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
+                cached = await asyncio.to_thread(cs.get_cached_groups)
+                db_groups = [(int(g["id"]), g["title"]) for g in cached]
                 
                 options = []
                 for gid, title in db_groups:
@@ -950,7 +953,7 @@ class GuardApp(App):
         except Exception as e:
             self.notify(f"Failed to load config: {e}", severity="error")
 
-    def save_config_from_ui(self) -> None:
+    async def save_config_from_ui(self) -> None:
         try:
             # Group 1: Auth
             api_id = self.query_one("#setting-api-id", Input).value.strip()
@@ -1104,7 +1107,7 @@ class GuardApp(App):
             asyncio.create_task(self.restart_listener_engine())
             
             # Toggle back to dashboard
-            self.toggle_settings()
+            await self.toggle_settings()
         except Exception as e:
             self.notify(f"Failed to save config: {e}", severity="error", title="Error")
 
@@ -1275,7 +1278,7 @@ class GuardApp(App):
             self._status_widget.update("Status: [bold red]Stopped[/]\nUptime: 0h 0m\nUser Account: ?")
             self._stats_widget.update("Processed: 0 files\nToday Downloaded: 0\nToday Uploaded: 0\nToday Failed: 0\nToday Data Size: 0 B")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         btn_id = event.button.id
 
         # Dynamic cancel buttons: cancel-{msg_id}
@@ -1305,15 +1308,15 @@ class GuardApp(App):
             asyncio.create_task(self.restart_listener_engine())
             self.notify("Sent Restart command to listener engine.", title="Status Update")
         elif btn_id == "btn-goto-settings" or btn_id == "btn-back-dashboard":
-            self.toggle_settings()
+            await self.toggle_settings()
         elif btn_id == "btn-goto-gallery" or btn_id == "btn-back-gallery":
-            asyncio.create_task(self.toggle_gallery())
+            await self.toggle_gallery()
         elif btn_id == "btn-goto-analytics" or btn_id == "btn-back-analytics":
             self.toggle_analytics()
         elif btn_id == "btn-goto-selective" or btn_id == "btn-back-selective":
-            self.toggle_selective()
+            await self.toggle_selective()
         elif btn_id == "btn-save-settings":
-            self.save_config_from_ui()
+            await self.save_config_from_ui()
         elif btn_id == "btn-reset-settings":
             self.reset_to_defaults()
         elif btn_id == "btn-sync-groups":
@@ -1364,8 +1367,8 @@ class GuardApp(App):
         asyncio.create_task(self.restart_listener_engine())
         self.notify("Sent Restart command to listener engine.", title="Status Update")
 
-    def action_cmd_config(self) -> None:
-        self.toggle_settings()
+    async def action_cmd_config(self) -> None:
+        await self.toggle_settings()
 
     async def action_cmd_gallery(self) -> None:
         await self.toggle_gallery()
@@ -1373,8 +1376,8 @@ class GuardApp(App):
     def action_cmd_analytics(self) -> None:
         self.toggle_analytics()
 
-    def action_cmd_selective(self) -> None:
-        self.toggle_selective()
+    async def action_cmd_selective(self) -> None:
+        await self.toggle_selective()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "setting-raw-file-select":
