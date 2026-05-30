@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Telegram DL Guard
+# Telegram DL Guard
 
 ### High-Performance Media Downloader & Auto-Uploader for Telegram
 
@@ -14,7 +14,7 @@
 **Real-time media interception** from Telegram groups with concurrent downloads,
 intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Configuration](#-configuration) · [Architecture](#-architecture) · [Rule Engine](#-rule-engine)
+[Features](#features) · [Quick Start](#quick-start) · [Configuration](#configuration) · [Architecture](#architecture)
 
 </div>
 
@@ -26,13 +26,13 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 
 ---
 
-## ✨ Features
+## Features
 
 <table>
 <tr>
 <td width="50%">
 
-### 🎯 Core
+### Core
 - **Real-time Listener** — Intercepts media the instant it's posted
 - **Concurrent Downloads** — Parallel download pool with configurable queue
 - **Auto-Upload** — Forward downloaded media to a private storage group
@@ -41,8 +41,7 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 </td>
 <td width="50%">
 
-### 🛡️ Intelligence
-- **Rule Engine** — YAML-based conditional rules (skip, tag, prioritize)
+### Intelligence
 - **Smart Deduplication** — SHA-256 hash + file-size fallback detection
 - **Album Grouping** — Custom 2s buffered flusher for 100% album capture
 - **Super Grabber** — One-click bypass of all filters for maximum capture
@@ -52,7 +51,7 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 <tr>
 <td>
 
-### 🖥️ Interface
+### Interface
 - **Terminal UI (TUI)** — Rich dashboard built with [Textual](https://textual.textualize.io/)
 - **Live Progress** — Real-time download/upload bars with speed & ETA
 - **In-App Settings** — Configure everything without touching config files
@@ -61,7 +60,7 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 </td>
 <td>
 
-### ⚙️ Performance
+### Performance
 - **WAL + Indexed SQLite** — Thread-safe DB with RAM-backed I/O
 - **Priority Queue** — FIFO / size-ascending / size-descending ordering
 - **Exponential Backoff** — Retry with jitter for FloodWait resilience
@@ -73,29 +72,24 @@ intelligent deduplication, auto-upload to storage, and a beautiful terminal UI.
 
 ---
 
-## 📐 Architecture
+## Architecture
 
 ```
 telegram-dl-guard/
 ├── run.py                 # Cross-platform launcher (CLI args supported)
 ├── run.bat                # Windows quick-start menu
-├── guard.py               # Telegram client bootstrap & session manager
 ├── listener.py            # Event loop: message interception, album buffer, download orchestration
 ├── uploader.py            # Upload worker pool, caption builder, retry logic, async webhook dispatcher
-├── tui.py                 # Lightweight launcher calling modular TUI package
 ├── config.py              # Unified config loader (.env + config.yaml)
 ├── config.yaml            # Non-secret settings
-├── rules.yaml             # Conditional rule engine definitions
 ├── .env                   # Secrets (API credentials, session string)
 │
 ├── core/
 │   ├── state.py           # SQLite WAL persistence (download tracker, group cache, LRU HashCache)
 │   ├── download_handler.py# File resolver, hash dedup, parent path safety
-│   ├── rules.py           # YAML rule parser & evaluator
 │   ├── history.py         # Historical message scanner (fast cached mode)
 │   ├── cleanup.py         # Periodic file, DB & empty directory cleanup tasks
 │   ├── commands.py        # Telegram bot command handler
-│   ├── config_reloader.py # Hot-reload .env/yaml changes via metadata stat checks
 │   └── utils.py           # Shared utilities
 │
 ├── tui/                   # Decoupled TUI Package Component
@@ -131,7 +125,7 @@ graph LR
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -187,7 +181,7 @@ python run.py setup     # First-time session setup
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 Configuration uses a layered system: `.env` (secrets, highest priority) → `config.yaml` (defaults).
 
@@ -265,68 +259,7 @@ All `config.yaml` keys can be overridden via environment variables:
 
 ---
 
-## 📜 Rule Engine
-
-Define conditional rules in `rules.yaml` to automate download behavior per message:
-
-```yaml
-rules:
-  # Skip tiny documents (likely spam)
-  - name: "Skip small docs"
-    when:
-      media_type: "doc"
-      file_size_lt: 102400          # < 100KB
-    action:
-      skip: true
-
-  # Priority upload from important group
-  - name: "Priority from VIP"
-    when:
-      source_group: "VIP Channel"
-    action:
-      priority: true
-
-  # Tag content by filename pattern
-  - name: "Tag wallpapers"
-    when:
-      filename_regex: "(wallpaper|bg_)"
-    action:
-      tag: "wallpaper"
-
-  # Skip oversized videos
-  - name: "Skip large videos"
-    when:
-      media_type: "video"
-      file_size_gt: 52428800        # > 50MB
-    action:
-      skip: true
-```
-
-### Available Conditions
-
-| Condition | Type | Description |
-|-----------|------|-------------|
-| `sender` | Exact match | Sender name (case-insensitive) |
-| `sender_contains` | Substring | Partial sender name match |
-| `filename_regex` | Regex | Pattern match on filename |
-| `media_type` | Enum | `photo` \| `video` \| `doc` |
-| `file_size_gt` | Integer | File size greater than (bytes) |
-| `file_size_lt` | Integer | File size less than (bytes) |
-| `source_group` | Exact match | Source group name |
-
-### Available Actions
-
-| Action | Description |
-|--------|-------------|
-| `skip: true` | Do not download |
-| `tag: "label"` | Add categorization tag |
-| `album: true` | Force album grouping |
-| `priority: true` | Upload immediately (skip queue) |
-| `move_to: "path"` | Move file after download |
-
----
-
-## 🔧 Telegram Commands
+## Telegram Commands
 
 When running in listener mode, the bot responds to these commands in your Telegram chat:
 
@@ -339,14 +272,14 @@ When running in listener mode, the bot responds to these commands in your Telegr
 
 ---
 
-## 🛡️ Super Grabber Mode
+## Super Grabber Mode
 
 When enabled, Super Grabber **bypasses all restrictions**:
 
 - File size limits (`min_file_size`, `max_file_size`)
 - Media type filters (`media_types`)
 - Blocked sender list (`blocked_senders`)
-- All `rules.yaml` evaluations
+- All filter evaluations
 
 Enable via TUI settings toggle or set `SUPER_GRABBER_MODE=true` in `.env`.
 
@@ -354,7 +287,7 @@ Designed for scenarios where you need **every single file** from a group without
 
 ---
 
-## 📦 Album Grouping System
+## Album Grouping System
 
 Telegram's native album events are unreliable — messages arrive in separate packets causing split groups and missing files.
 
@@ -368,7 +301,7 @@ DL Guard uses a **custom in-memory buffering system**:
 
 ---
 
-## 🗄️ Database
+## Database
 
 SQLite with WAL mode for concurrent read/write safety.
 
@@ -389,7 +322,7 @@ SQLite with WAL mode for concurrent read/write safety.
 
 ---
 
-## 🧹 Cleanup System
+## Cleanup System
 
 Two cleanup mechanisms run in the background:
 
@@ -399,7 +332,7 @@ Two cleanup mechanisms run in the background:
 
 ---
 
-## 🔒 Privacy, Security & Trademark Notice
+## Privacy, Security & Trademark Notice
 
 ### 1. Zero Telemetry & Privacy Guarantee
 This application is **100% local, offline-first, and open-source**. It contains **no telemetry, no tracking, and no analytics**. 
@@ -416,7 +349,7 @@ This Software is an unofficial third-party client. It is **not** affiliated with
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 ```
 Telethon==1.43.2
@@ -431,7 +364,7 @@ Pillow>=12.0.0
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -441,7 +374,7 @@ Pillow>=12.0.0
 
 ---
 
-## 💖 Support & Tip Me
+## Support & Tip Me
 
 If this project has saved you time, disk space, or made your media archiving smoother, consider buying the developer a coffee or tipping! Your support helps keep this tool free, secure, and actively updated.
 
@@ -450,7 +383,7 @@ If this project has saved you time, disk space, or made your media archiving smo
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the Non-Commercial Personal Use License — see the [LICENSE](LICENSE) file for details. Any commercial use, monetization, or selling of this application is strictly prohibited.
 
@@ -458,7 +391,6 @@ This project is licensed under the Non-Commercial Personal Use License — see t
 
 <div align="center">
 
-**Built with** 🐍 **Python** · ⚡ **Telethon** · 🖥️ **Textual**
+**Built with Python · Telethon · Textual**
 
 </div>
-
