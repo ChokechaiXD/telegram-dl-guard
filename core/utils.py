@@ -67,3 +67,43 @@ def sanitize_group(name: str) -> str:
     """Sanitize group name for use as folder name."""
     s = sanitize_filename(name) if name else ""
     return s[:60] or "unknown_group"
+
+
+import mimetypes
+
+_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".3gp"}
+_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+
+
+def detect_send_type(filepath: Path | str) -> str:
+    """Detect send type based on file extension."""
+    p = Path(filepath)
+    ext = p.suffix.lower()
+    if ext in _PHOTO_EXTS:
+        return "photo"
+    if ext in _VIDEO_EXTS:
+        return "video"
+    return "document"
+
+
+def guess_mime(filepath: Path | str) -> str:
+    """Return a proper MIME type for the file based on its extension."""
+    p = Path(filepath)
+    mime, _ = mimetypes.guess_type(p.name)
+    if mime:
+        return mime
+    ext = p.suffix.lower()
+    fallback = {
+        ".mp4": "video/mp4", ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo", ".mov": "video/quicktime",
+        ".webm": "video/webm", ".flv": "video/x-flv",
+        ".wmv": "video/x-ms-wmv", ".m4v": "video/x-m4v",
+        ".3gp": "video/3gpp",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".gif": "image/gif",
+        ".webp": "image/webp", ".bmp": "image/bmp",
+        ".pdf": "application/pdf", ".zip": "application/zip",
+        ".rar": "application/x-rar-compressed",
+    }
+    return fallback.get(ext, "application/octet-stream")
+

@@ -111,6 +111,7 @@
         <div class="toolbar-actions">
             <button id="btn-select-all" class="btn btn-secondary">Select All</button>
             <button id="btn-clear-selection" class="btn btn-secondary">Clear</button>
+            <button id="btn-forward" class="btn btn-primary" style="background: linear-gradient(135deg, var(--accent-secondary), var(--accent-primary)); color: #07090e;">Forward to Storage</button>
             <button id="btn-download" class="btn btn-success">Download Selected Files</button>
         </div>
     </div>
@@ -122,6 +123,7 @@
             <button class="close-modal-btn" onclick="closeVideoModal()">×</button>
             <div class="video-player-container">
                 <video id="modal-video-player" controls autoplay></video>
+                <img id="modal-image-viewer" style="display: none; width: 100%; height: 100%; object-fit: contain;">
             </div>
             <div class="modal-meta">
                 <h3 id="modal-title">Video Stream</h3>

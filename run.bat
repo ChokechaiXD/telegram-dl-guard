@@ -41,23 +41,23 @@ goto menu
 
 :tui
 set PYTHONUNBUFFERED=1
-venv\Scripts\python tui.py
+venv\Scripts\python run.py 1
 goto menu
 
 :setup
-venv\Scripts\python guard.py --setup
+venv\Scripts\python run.py 2
 pause
 goto menu
 
 :listen
 set PYTHONUNBUFFERED=1
-venv\Scripts\python guard.py --listen
+venv\Scripts\python run.py 3
 pause
 goto menu
 
 :web
 set PYTHONUNBUFFERED=1
-venv\Scripts\python web_server.py
+venv\Scripts\python run.py 4
 pause
 goto menu
 

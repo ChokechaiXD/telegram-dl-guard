@@ -52,10 +52,20 @@ class SettingsContainer(VerticalScroll):
                     id="setting-queue-size",
                     prompt="Select Queue Size"
                 )
+            with Horizontal(classes="setting-row"):
+                yield Label("Processing Mode:")
+                yield Select(
+                    options=[
+                        ("Download & Local Save", "download"),
+                        ("Direct Forward (No Download)", "forward")
+                    ],
+                    id="setting-processing-mode",
+                    prompt="Select Processing Mode"
+                )
         
-        # GROUP 3: Deduplication & Smart Settings
+        # GROUP 3: Deduplication & Core Logic
         with Vertical(classes="settings-group"):
-            yield Label("Deduplication & Smart Rules", classes="card-title")
+            yield Label("Deduplication & Core Logic", classes="card-title")
             with Horizontal(classes="setting-row"):
                 yield Label("Enable Deduplication:")
                 yield Switch(id="setting-dedup-enabled")
@@ -279,8 +289,7 @@ class SettingsContainer(VerticalScroll):
                 yield Select(
                     options=[
                         (".env (Secrets & Overrides)", ".env"),
-                        ("config.yaml (Non-secrets)", "config.yaml"),
-                        ("rules.yaml (Rule Engine Definitions)", "rules.yaml")
+                        ("config.yaml (Non-secrets)", "config.yaml")
                     ],
                     id="setting-raw-file-select",
                     prompt="Choose file to edit"

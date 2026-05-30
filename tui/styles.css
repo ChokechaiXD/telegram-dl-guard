@@ -216,11 +216,7 @@ Input:focus, Select:focus, TextArea:focus {
     padding: 1 2;
 }
 
-#rules-container {
-    height: 1fr;
-    display: none;
-    padding: 1 2;
-}
+
 
 #analytics-top-row, #analytics-bottom-row {
     height: auto;
@@ -234,37 +230,7 @@ Input:focus, Select:focus, TextArea:focus {
     height: auto;
 }
 
-#rules-layout {
-    height: auto;
-    layout: horizontal;
-}
-
-#rules-registry-column {
-    width: 45%;
-    height: auto;
-    margin-right: 2;
-    background: #11151c;
-    border: solid #1f2937;
-    padding: 1;
-}
-
-#rules-editor-column {
-    width: 55%;
-    height: auto;
-    background: #11151c;
-    border: solid #1f2937;
-    padding: 1;
-}
-
-#rules-list-box {
-    height: auto;
-    background: #090b0f;
-    border: solid #1f2937;
-    padding: 1;
-    margin-bottom: 1;
-}
-
-.rule-card-row {
+.selective-card-row {
     height: auto;
     align: left middle;
     margin-bottom: 1;
@@ -272,30 +238,9 @@ Input:focus, Select:focus, TextArea:focus {
     padding-bottom: 1;
 }
 
-.rule-card-info {
+.selective-card-info {
     width: 100%;
     color: #c9d1d9;
-}
-
-.btn-rule-arrow {
-    width: 4;
-    min-width: 4;
-    margin-left: 1;
-    padding: 0;
-}
-
-.btn-rule-action {
-    width: 8;
-    min-width: 8;
-    margin-left: 1;
-    padding: 0;
-}
-
-.rule-form-section {
-    color: #58a6ff;
-    text-style: bold;
-    margin-top: 1;
-    margin-bottom: 1;
 }
 
 #target-groups-checkbox-row {

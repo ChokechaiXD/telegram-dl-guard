@@ -19,10 +19,9 @@ from telethon import TelegramClient
 from config import AppConfig
 from core.download_handler import (
     _ensure_dir, _file_hash_async, _hashes,
-    _media_name, _mtype, _resolve_download_path, _rules,
+    _media_name, _mtype, _resolve_download_path,
     _resolve_sender_info, compute_priority_key,
 )
-from core.rules import evaluate_rules, move_to_folder
 from core.state import (
     ACTIVE_UPLOADS, GLOBAL_STATUS, mark_pending,
 )
@@ -133,18 +132,6 @@ async def run_history_scan(
                 fpath = ddir / fname
                 original_caption = (getattr(msg, "message", None) or "").strip()
 
-                rule_priority = False
-                if _rules and not is_super:
-                    rule_action = evaluate_rules(_rules, sender, fname, mt, file_size, group_title)
-                    if rule_action:
-                        if rule_action.skip:
-                            continue
-                        rule_priority = rule_action.priority
-                        if rule_action.tag:
-                            original_caption = f"{original_caption} #{rule_action.tag}".strip()
-                        if rule_action.move_to:
-                            fpath = move_to_folder(fpath, rule_action.move_to)
-
                 fpath = _resolve_download_path(fpath, file_size or None, msg.id)
                 if fpath is None:
                     continue  # duplicate
@@ -179,7 +166,7 @@ async def run_history_scan(
                             if upload_queue is not None:
                                 mark_pending(str(fpath), source_group=group_title, sender_name=sender, caption=original_caption, file_hash=fh)
                                 ACTIVE_UPLOADS.add(str(fpath))
-                                pkey = compute_priority_key(sz, total_downloaded, rule_priority)
+                                pkey = compute_priority_key(sz, total_downloaded)
                                 dt = datetime.fromtimestamp(fpath.stat().st_mtime)
                                 payload = (str(fpath), sender, username, dt, group_title, original_caption, None)
                                 upload_queue.put_nowait((pkey, 900000 + total_downloaded, payload))

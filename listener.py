@@ -27,7 +27,7 @@ from core.cleanup import _cleanup_task, _aggressive_uploaded_cleanup_task
 import core.download_handler as dh
 from core.download_handler import (
     _cfg, _extract_peer_id, _file_hash, _file_hash_async, _dhash_async,
-    _fmt_speed, _hashes, _media_name,
+    _hashes, _media_name,
     _resolve_download_path, _resolve_group_name, _resolve_peer_ids,
     _resolve_sender_info, _mtype, _ensure_dir, compute_priority_key,
 )
@@ -36,9 +36,7 @@ from core.state import (
     ACTIVE_UPLOADS, get_pending_details, remove_entry, persist_state,
     mark_pending, is_hash_exists, is_phash_exists, get_phash_match
 )
-from core.rules import load_rules, compile_rules, evaluate_rules
-from core.utils import sanitize_group
-from core.config_reloader import ConfigReloader
+from core.utils import sanitize_group, format_bytes
 from core.commands import CommandHandler
 from uploader import upload_worker
 
@@ -47,9 +45,11 @@ _MAX_PROCESSED = 50000
 MAX_PENDING = 50  # hard limit for fire-and-forget download tasks
 _pending_tasks: set[asyncio.Task] = set()
 ALBUM_BUFFER: dict[int, dict[str, Any]] = {}
+FORWARD_LOCK = asyncio.Lock()
+_last_forward_time = 0.0
 
 
-# ── Dedup cache ─────────────────────────────────────────────────
+# Dedup cache
 
 
 class _DedupCache(OrderedDict):
@@ -63,7 +63,7 @@ class _DedupCache(OrderedDict):
             self.popitem(last=False)
 
 
-# ── Connection ──────────────────────────────────────────────────
+# Connection management
 
 
 async def connect_retry(client: TelegramClient, retries: int = 10, base: float = 5.0) -> bool:
@@ -87,7 +87,7 @@ async def connect_retry(client: TelegramClient, retries: int = 10, base: float =
     return False
 
 
-# ── Pre-check (shared) ──────────────────────────────────────────
+# Pre-check validation
 
 
 async def _pre_check(
@@ -134,14 +134,14 @@ async def _pre_check(
     return sender, username, group_name, mt, file_size
 
 
-# ── Download + queue ───────────────────────────────────────────
+# Download pipeline
 
 
 async def _do_download(
     client, msg, fpath: Path, ddir: Path, mt: str, sender: str,
     username: str | None, group_name: str, original_caption: str,
     album_group, file_size: int, upload_queue, dedup_method: str,
-    show_speed: bool, priority: bool = False,
+    show_speed: bool,
 ) -> bool:
     # Throttle download if active uploads backlog is too large to prevent local disk build-up
     if upload_queue is not None:
@@ -240,7 +240,7 @@ async def _do_download(
                                         pass
                                     return True
 
-                        ss = f" ({_fmt_speed(speed)})" if show_speed and speed > 0 else ""
+                        ss = f" ({format_bytes(int(speed))}/s)" if show_speed and speed > 0 else ""
                         log_msg = f"[{mt}] {sender}/{fpath.name} ({sz / 1_048_576:.1f}MB{ss})"
                         print(f"  {log_msg}")
                         sys.stdout.flush()
@@ -249,7 +249,7 @@ async def _do_download(
                         if upload_queue is not None:
                             mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh, p_hash=ph)
                             ACTIVE_UPLOADS.add(str(fpath))
-                            pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), priority)
+                            pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0))
                             payload = (str(fpath), sender, username, msg.date,
                                        group_name, original_caption, album_group)
                             upload_queue.put_nowait((pkey, msg.id, payload))
@@ -298,7 +298,7 @@ async def _do_download(
             ACTIVE_TASKS.pop(msg.id, None)
 
 
-# ── Main listener ──────────────────────────────────────────────
+# Main daemon runtime
 
 async def run(provided_client: TelegramClient | None = None) -> None:
     ACTIVE_UPLOADS.clear()
@@ -320,11 +320,6 @@ async def run(provided_client: TelegramClient | None = None) -> None:
     for mid in state_processed:
         processed.add(int(mid))
     dh._group_name_cache = _group_name_cache
-
-    # Rules
-    dh._rules = compile_rules(load_rules())
-    if dh._rules:
-        print(f"  Rules: {len(dh._rules)} rules loaded")
 
     # Filters
     media_set = {t.strip() for t in CFG.media_types.split(",") if t.strip()}
@@ -423,9 +418,12 @@ async def run(provided_client: TelegramClient | None = None) -> None:
     asyncio.create_task(_cleanup_task(_cfg))
     asyncio.create_task(_aggressive_uploaded_cleanup_task())
 
-    # Config hot-reload
-    _reloader = ConfigReloader()
-    asyncio.create_task(_reloader.start())
+    # Lightweight in-process config hot-reload
+    async def _reload_config_loop():
+        while True:
+            await asyncio.sleep(5.0)
+            dh.CFG = AppConfig.load()
+    asyncio.create_task(_reload_config_loop())
 
     # Commands (Telegram)
     _cmd_handler = CommandHandler()
@@ -438,19 +436,19 @@ async def run(provided_client: TelegramClient | None = None) -> None:
 
     atexit.register(_persist)
 
-    # ── Event handlers ─────────────────────────────────────────
+    # Telegram event handlers
 
     async def _enqueue_album_items_individually(
         download_targets: list, group_name: str, sender: str, username: str | None,
         grouped_id: int, upload_queue
     ) -> None:
-        for msg, fpath, mt, original_caption, rule_priority, fsize in download_targets:
+        for msg, fpath, mt, original_caption, fsize in download_targets:
             if fpath.exists() and fpath.stat().st_size > 0:
                 sz = fpath.stat().st_size
                 fh = await _file_hash_async(fpath)
                 mark_pending(str(fpath), source_group=group_name, sender_name=sender, caption=original_caption, file_hash=fh)
                 ACTIVE_UPLOADS.add(str(fpath))
-                pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), rule_priority)
+                pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0))
                 payload = (str(fpath), sender, username, msg.date, group_name, original_caption, grouped_id)
                 await upload_queue.put((pkey, msg.id, payload))
 
@@ -476,6 +474,36 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             for m in msgs:
                 processed.add(m.id)
             return
+
+        if getattr(dh.CFG, "processing_mode", "download") == "forward":
+            if not getattr(dh.CFG, "storage_group_id", None):
+                log.error("Forwarding failed: STORAGE_GROUP_ID is not configured.")
+                for m in msgs:
+                    processed.add(m.id)
+                return
+            try:
+                storage_id = int(dh.CFG.storage_group_id)
+                storage_entity = await client.get_entity(storage_id)
+                source_entity = await event.get_input_chat()
+                to_forward = []
+                for msg in msgs:
+                    if msg.id in processed:
+                        continue
+                    processed.add(msg.id)
+                    to_forward.append(msg.id)
+                if to_forward:
+                    log.info(f"Instant Album Forward: Forwarding {len(to_forward)} messages to storage group {storage_id}")
+                    async with FORWARD_LOCK:
+                        global _last_forward_time
+                        elapsed = time.time() - _last_forward_time
+                        if elapsed < 1.0:
+                            await asyncio.sleep(1.0 - elapsed)
+                        _last_forward_time = time.time()
+                        await client.forward_messages(storage_entity, to_forward, source_entity)
+                return
+            except Exception as fe:
+                log.error(f"Instant Album Forward failed: {fe}")
+                return
 
         media_set_dyn = {t.strip() for t in dh.CFG.media_types.split(",") if t.strip()}
         blocked_dyn = [s.strip().lower() for s in dh.CFG.blocked_senders.split(",") if s.strip()] if dh.CFG.blocked_senders else []
@@ -517,26 +545,11 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             fpath = ddir / fname
             fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
 
-            # Rule engine (bypassed in super grabber mode)
-            rule_priority = False
-            if dh._rules and not getattr(dh.CFG, "super_grabber_mode", False):
-                rule_action = evaluate_rules(dh._rules, sender, fname, mt, fsize, group_name)
-                if rule_action:
-                    if rule_action.skip:
-                        continue
-                    rule_priority = rule_action.priority
-                    if rule_action.tag:
-                        if original_caption and f"#{rule_action.tag}" not in original_caption:
-                            original_caption = f"{original_caption} #{rule_action.tag}".strip()
-                    if rule_action.move_to:
-                        from core.rules import move_to_folder
-                        fpath = move_to_folder(fpath, rule_action.move_to)
-
             fpath = _resolve_download_path(fpath, fsize or None, msg.id)
             if fpath is None:
                 continue
 
-            download_targets.append((msg, fpath, mt, original_caption, rule_priority, fsize))
+            download_targets.append((msg, fpath, mt, original_caption, fsize))
             
             # Pass None for upload_queue if deferring
             active_q = None if defer_queue else upload_queue
@@ -546,7 +559,6 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                     client, msg, fpath, fpath.parent, mt, sender, username,
                     group_name, original_caption, grouped_id, fsize,
                     active_q, dh.CFG.dedup_method, dh.CFG.show_speed,
-                    priority=rule_priority,
                 )
             )
 
@@ -560,7 +572,7 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             if defer_queue:
                 # Find all successfully downloaded files
                 downloaded_files = []
-                for _, fpath, _, _, _, _ in download_targets:
+                for _, fpath, _, _, _ in download_targets:
                     if fpath.exists() and fpath.stat().st_size > 0:
                         downloaded_files.append(fpath)
                 
@@ -592,10 +604,8 @@ async def run(provided_client: TelegramClient | None = None) -> None:
                         mark_pending(str(zip_path), source_group=group_name, sender_name=sender, caption=zip_caption, file_hash=zip_hash)
                         ACTIVE_UPLOADS.add(str(zip_path))
                         
-                        # Priority and Enqueue
-                        # If any part had priority, ZIP has priority
-                        priority_zip = any(t[4] for t in download_targets)
-                        pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0), priority_zip)
+                        # Enqueue ZIP
+                        pkey = compute_priority_key(sz, GLOBAL_STATUS.get("processed", 0))
                         payload = (str(zip_path), sender, username, first_msg.date, group_name, zip_caption, None)
                         await upload_queue.put((pkey, first_msg.id, payload))
                         log.info(f"Auto-Zip complete: Enqueued archive {zip_name}")
@@ -653,23 +663,31 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             return
         sender, username, group_name, mt, file_size = r
 
-        # Rule engine (bypassed in super grabber mode)
+        if getattr(dh.CFG, "processing_mode", "download") == "forward":
+            if not getattr(dh.CFG, "storage_group_id", None):
+                log.error("Forwarding failed: STORAGE_GROUP_ID is not configured.")
+                return
+            try:
+                storage_id = int(dh.CFG.storage_group_id)
+                storage_entity = await client.get_entity(storage_id)
+                source_entity = await event.get_input_chat()
+                log.info(f"Instant Single Forward: Forwarding message {msg.id} to storage group {storage_id}")
+                async with FORWARD_LOCK:
+                    global _last_forward_time
+                    elapsed = time.time() - _last_forward_time
+                    if elapsed < 1.0:
+                        await asyncio.sleep(1.0 - elapsed)
+                    _last_forward_time = time.time()
+                    await client.forward_messages(storage_entity, msg.id, source_entity)
+                return
+            except Exception as fe:
+                log.error(f"Instant Single Forward failed: {fe}")
+                return
+
+        # Build download path
         fname = _media_name(msg.media, msg.date, msg.id)
         fpath = Path(dh.CFG.download_dir) / _sanitize_group(group_name) / sender / fname
         original_caption = (getattr(msg, "message", None) or "").strip()
-
-        rule_priority = False
-        if dh._rules and not getattr(dh.CFG, "super_grabber_mode", False):
-            rule_action = evaluate_rules(dh._rules, sender, fname, mt, file_size, group_name)
-            if rule_action:
-                if rule_action.skip:
-                    return
-                rule_priority = rule_action.priority
-                if rule_action.tag:
-                    original_caption = f"{original_caption} #{rule_action.tag}".strip()
-                if rule_action.move_to:
-                    from core.rules import move_to_folder
-                    fpath = move_to_folder(fpath, rule_action.move_to)
 
         fpath = _resolve_download_path(fpath, file_size or None, msg.id)
         if fpath is None:
@@ -685,12 +703,11 @@ async def run(provided_client: TelegramClient | None = None) -> None:
             client, msg, fpath, fpath.parent, mt, sender, username,
             group_name, original_caption, album_group, file_size,
             upload_queue, dh.CFG.dedup_method, dh.CFG.show_speed,
-            priority=rule_priority,
         ))
         _pending_tasks.add(task)
         task.add_done_callback(_pending_tasks.discard)
 
-    # ── Start listening ────────────────────────────────────────
+    # Initialization and runtime
 
     me = await client.get_me()
     _cmd_handler.set_user(me.id)

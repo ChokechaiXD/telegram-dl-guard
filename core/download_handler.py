@@ -31,8 +31,8 @@ log = logging.getLogger("guard.listener")
 _hashes = HashCache(max_size=2048)
 _sender_cache: dict[int, tuple[str, str | None]] = {}  # sid -> (name, username)
 _group_name_cache: dict[int, str] = {}
-_rules: list = []
 DL_DIR: Path = Path("downloads")
+
 DL_SEM = None  # type: ignore
 CFG = None  # type: ignore
 
@@ -42,9 +42,7 @@ def _cfg():
     return CFG
 
 
-def compute_priority_key(file_size: int, seq: int, is_priority: bool = False) -> int:
-    if is_priority:
-        return -999999999
+def compute_priority_key(file_size: int, seq: int) -> int:
     prio = CFG.download_priority if CFG else "fifo"
     if prio == "size_asc":
         return file_size
@@ -155,12 +153,6 @@ def _sanitize(s: str) -> str:
     return sanitize_filename(s)
 
 
-def _fmt_speed(bps: float) -> str:
-    if bps >= 1_048_576:
-        return f"{bps / 1_048_576:.1f} MB/s"
-    if bps >= 1024:
-        return f"{bps / 1024:.1f} KB/s"
-    return f"{bps:.0f} B/s"
 
 
 async def _resolve_sender_info(event) -> tuple[str, str | None]:

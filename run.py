@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Launch script — run from terminal: python run.py
-Falls back to run.bat if python not available.
+Telegram DL Guard — Consolidated Unified Entrypoint.
+Manages Venv, interactive TUI, headless daemon, setup wizard, and web companion.
 """
 from __future__ import annotations
 
 import os
 import sys
+import asyncio
 import subprocess
+import logging
 from pathlib import Path
 
 BASE = Path(__file__).parent
@@ -16,7 +18,6 @@ if sys.platform == "win32":
 else:
     VENV_PY = BASE / "venv" / "bin" / "python"
 REQUIREMENTS = BASE / "requirements.txt"
-
 
 def ensure_venv() -> None:
     if VENV_PY.exists():
@@ -33,20 +34,203 @@ def ensure_venv() -> None:
         print("Please ensure Python is installed and you have internet access.")
         sys.exit(1)
 
+# Self-re-execution inside venv
+if os.environ.get("GUARD_IN_VENV") != "1":
+    ensure_venv()
+    env = os.environ.copy()
+    env["GUARD_IN_VENV"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+    cmd = [str(VENV_PY)] + sys.argv
+    try:
+        sys.exit(subprocess.run(cmd, env=env).returncode)
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+# From here on, we are guaranteed to be running inside VENV!
+from dotenv import set_key
+from config import AppConfig
+from core.utils import setup_logging
+
+def _is_logged_in() -> bool:
+    return bool(AppConfig.load().session_string)
+
+def _fmt_upload_mode() -> str:
+    enabled = os.getenv("UPLOAD_ENABLED", "false") == "true"
+    if not enabled:
+        return "OFF"
+    mode = os.getenv("UPLOAD_MODE", "realtime_keep")
+    labels = {
+        "realtime_keep": "RT+Keep",
+        "realtime_delete": "RT+Delete",
+        "batch_keep": "Batch+Keep",
+        "batch_delete": "Batch+Delete",
+    }
+    return labels.get(mode, mode)
+
+async def _do_login() -> None:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    cfg = AppConfig.load()
+    phone = input("  Phone (+66...): ").strip()
+    if not phone:
+        return
+    cli = TelegramClient(StringSession(), cfg.api_id, cfg.api_hash)
+    await cli.start(phone=phone)
+    me = await cli.get_me()
+    set_key(".env", "SESSION_STRING", str(cli.session.save()))
+    print(f"  [OK] Logged in successfully as: {me.first_name}")
+    await cli.disconnect()
+    print("  Please restart DL Guard to use new session.")
+
+async def _start_listener() -> None:
+    from listener import run
+    cfg = AppConfig.load()
+    print(f"\n{'=' * 40}\n  Telegram DL Guard -- Headless Listener\n{'=' * 40}")
+    print(f"  Groups:   {cfg.target_groups}")
+    print(f"  Media:    {cfg.media_types}")
+    print(f"  Dedup:    {cfg.dedup_method} / redownload={cfg.dedownload}")
+    print(f"  Storage:  {cfg.storage_group_id or 'not set'}")
+    print(f"  Upload:   {_fmt_upload_mode()}")
+    print(f"{'--' * 40}")
+
+    is_interactive = sys.stdin.isatty() and "--listen" not in sys.argv
+    while True:
+        try:
+            await run()
+            if not is_interactive:
+                print("  Listener exited cleanly. Restarting in 2s...")
+                await asyncio.sleep(2)
+                continue
+        except KeyboardInterrupt:
+            print("\n  Stopped.")
+            break
+        except Exception as e:
+            logging.getLogger("guard").error("Listener crashed: %s", e)
+            if not is_interactive:
+                await asyncio.sleep(5)
+                continue
+        if not is_interactive:
+            break
+
+async def _first_run_wizard() -> None:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    print(f"\n{'=' * 45}")
+    print("  First-Run Setup Wizard")
+    print(f"{'=' * 45}\n")
+
+    cfg = AppConfig.load()
+
+    # Step 1: API credentials
+    if cfg.api_id and cfg.api_hash:
+        print("  Step 1: API Credentials")
+        print(f"  [INFO] API Credentials loaded: ID={cfg.api_id}")
+    else:
+        print("  Step 1: API Credentials")
+        print("  Go to https://my.telegram.org/apps to get API_ID and API_HASH")
+        aid = input("  API_ID: ").strip()
+        ahash = input("  API_HASH: ").strip()
+        if aid and ahash:
+            set_key(".env", "API_ID", aid)
+            set_key(".env", "API_HASH", ahash)
+            print("  [OK] Saved Credentials")
+        cfg = AppConfig.load()
+
+    # Step 2: Login
+    if _is_logged_in():
+        print("\n  Step 2: Login to Telegram")
+        try:
+            cli = TelegramClient(StringSession(cfg.session_string), cfg.api_id, cfg.api_hash)
+            await cli.connect()
+            if await cli.is_user_authorized():
+                me = await cli.get_me()
+                print(f"  [INFO] Active Telegram session found. (Logged in as: {me.first_name})")
+            else:
+                print("  [WARNING] Session found but it is unauthorized/expired.")
+            await cli.disconnect()
+        except Exception:
+            print("  [INFO] Active Telegram session found. (Already logged in)")
+        
+        relogin = input("  Do you want to re-login? (y/N): ").strip().lower()
+        if relogin == 'y':
+            await _do_login()
+            cfg = AppConfig.load()
+        else:
+            print("  [OK] Keeping current Telegram login session.")
+    else:
+        print("\n  Step 2: Login to Telegram")
+        await _do_login()
+        cfg = AppConfig.load()
+
+    # Step 3: Storage group
+    if not cfg.storage_group_id:
+        print("\n  Step 3: Storage Group (where files get uploaded)")
+        cli = TelegramClient(StringSession(cfg.session_string), cfg.api_id, cfg.api_hash)
+        await cli.start()
+        groups = [d async for d in cli.iter_dialogs() if d.is_group or d.is_channel]
+        print(f"  Found {len(groups)} groups/channels:")
+        for i, g in enumerate(groups):
+            mark = " *" if g.is_channel else ""
+            title = g.title[:40] if g.title else "(no title)"
+            print(f"    [{i + 1:3d}] {g.id}  {title}{mark}")
+        sel = input("  Select storage group (number): ").strip()
+        if sel.isdigit() and 1 <= int(sel) <= len(groups):
+            sid = groups[int(sel) - 1].id
+            set_key(".env", "STORAGE_GROUP_ID", str(sid))
+            print(f"  [OK] Storage Group Saved: {groups[int(sel) - 1].title}")
+        await cli.disconnect()
+
+    # Step 4: Source groups
+    if not cfg.target_groups:
+        print("\n  Step 4: Source Groups (where to download from)")
+        cli = TelegramClient(StringSession(cfg.session_string), cfg.api_id, cfg.api_hash)
+        await cli.start()
+        groups = [d async for d in cli.iter_dialogs() if d.is_group or d.is_channel]
+        print(f"  Toggle groups (comma-separated numbers):")
+        for i, g in enumerate(groups):
+            title = g.title[:40] if g.title else "(no title)"
+            print(f"    [{i + 1:3d}] {g.id}  {title}")
+        sel = input("  Select: ").strip()
+        ids = []
+        for s in sel.split(","):
+            s = s.strip()
+            if s.isdigit() and 1 <= int(s) <= len(groups):
+                ids.append(str(groups[int(s) - 1].id))
+        if ids:
+            set_key(".env", "TARGET_GROUPS", ",".join(ids))
+            print(f"  [OK] {len(ids)} source groups saved")
+        await cli.disconnect()
+
+    # Step 5: Upload mode
+    mode = os.getenv("UPLOAD_ENABLED", "false")
+    if mode != "true":
+        print("\n  Step 5: Enable auto-upload?")
+        print("  [1] Yes (realtime + keep)  [2] Yes (realtime + delete)")
+        print("  [3] Yes (batch + keep)     [4] Yes (batch + delete)")
+        print("  [0] No (manual only)")
+        sel = input("  > ").strip()
+        modes = {"1": "realtime_keep", "2": "realtime_delete", "3": "batch_keep", "4": "batch_delete"}
+        if sel in modes:
+            set_key(".env", "UPLOAD_ENABLED", "true")
+            set_key(".env", "UPLOAD_MODE", modes[sel])
+            print(f"  [OK] Upload enabled: {modes[sel]}")
+
+    print(f"\n{'=' * 45}")
+    print("  Setup complete! Starting Headless Listener...\n")
+    await _start_listener()
 
 def update_dependencies() -> None:
     print("[SETUP] Updating/Verifying dependencies...")
     try:
-        subprocess.run([str(VENV_PY), "-m", "pip", "install", "--upgrade", "pip"], check=True, cwd=BASE)
-        subprocess.run([str(VENV_PY), "-m", "pip", "install", "-U", "-r", str(REQUIREMENTS)], check=True, cwd=BASE)
+        subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], check=True, cwd=BASE)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-U", "-r", str(REQUIREMENTS)], check=True, cwd=BASE)
         print("[OK] Dependencies are up to date.")
     except Exception as e:
         print(f"\n[ERROR] Failed to update dependencies: {e}")
 
-
 def menu() -> str:
     print("=" * 40)
-    print("  Telegram DL Guard v3.9")
+    print("  Telegram DL Guard v3.9 — Unified Console")
     print("=" * 40)
     print()
     print("  1  Run DL Guard (Interactive TUI)")
@@ -59,40 +243,37 @@ def menu() -> str:
     print()
     return input("> ").strip()
 
-
-def run_action(choice: str) -> bool:
-    """Runs the selected action. Returns True if we should pause after execution."""
-    actions = {
-        "1": ["tui.py"],
-        "2": ["guard.py", "--setup"],
-        "3": ["guard.py", "--listen"],
-        "4": ["web_server.py"],
-    }
-    
-    if choice == "5":
+def run_action_sync(choice: str) -> bool:
+    """Runs the selected action synchronously in-process or via lightweight launch."""
+    if choice == "1":
+        # Launch TUI in-process
+        from tui.app import GuardApp
+        GuardApp().run()
+        return False
+    elif choice == "2":
+        asyncio.run(_first_run_wizard())
+        return True
+    elif choice == "3":
+        asyncio.run(_start_listener())
+        return True
+    elif choice == "4":
+        # Spawning Web Dashboard as a subprocess is clean to keep Uvicorn logs in its own loop
+        cmd = [sys.executable, "-u", "web_server.py"]
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        try:
+            subprocess.run(cmd, cwd=BASE, env=env)
+        except KeyboardInterrupt:
+            pass
+        return True
+    elif choice == "5":
         update_dependencies()
         return True
-
-    if choice not in actions:
-        return False
-
-    script = actions[choice]
-    cmd = [str(VENV_PY), "-u"] + script
-    
-    # Ensure stdout/stderr are unbuffered
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    
-    try:
-        subprocess.run(cmd, cwd=BASE, env=env)
-    except KeyboardInterrupt:
-        pass
-        
-    return choice in ("2", "3", "4")
-
+    return False
 
 def main() -> None:
-    ensure_venv()
+    cfg = AppConfig.load()
+    setup_logging(level=cfg.log_level, log_file=cfg.log_file)
 
     # Handle command-line arguments to bypass menu
     if len(sys.argv) > 1:
@@ -106,7 +287,7 @@ def main() -> None:
         }
         choice = alias.get(arg)
         if choice:
-            should_pause = run_action(choice)
+            should_pause = run_action_sync(choice)
             if should_pause:
                 input("\nPress Enter to continue...")
             return
@@ -120,11 +301,9 @@ def main() -> None:
         if choice == "0":
             break
         
-        should_pause = run_action(choice)
+        should_pause = run_action_sync(choice)
         if should_pause:
             input("\nPress Enter to continue...")
 
-
 if __name__ == "__main__":
     main()
-

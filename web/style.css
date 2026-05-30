@@ -564,12 +564,14 @@ select.form-input {
     bottom: 24px;
     left: 50%;
     transform: translateX(-50%) translateY(100px);
-    width: 580px;
+    max-width: 95vw;
+    width: max-content;
     border-radius: 40px;
     padding: 12px 28px;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 24px;
     z-index: 100;
     transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.15);
     border-color: var(--border-glass-hover);
@@ -683,4 +685,104 @@ select.form-input {
 .modal-meta p {
     font-size: 13px;
     color: var(--text-secondary);
+}
+
+/* --- Album Grouping --- */
+.album-container {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 20px;
+    border-radius: var(--radius-lg);
+    background: rgba(12, 15, 22, 0.4);
+    border: 1px dashed rgba(0, 242, 195, 0.35);
+    box-shadow: var(--shadow-premium);
+    transition: var(--transition-smooth);
+}
+
+.album-container:hover {
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 20px rgba(0, 242, 195, 0.15);
+}
+
+.album-header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    border-bottom: 1px solid var(--border-glass);
+    padding-bottom: 12px;
+}
+
+.album-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.album-badge {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: #07090e;
+    padding: 4px 10px;
+    border-radius: 20px;
+    box-shadow: 0 0 10px rgba(0, 242, 195, 0.25);
+}
+
+.album-meta-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.album-caption-text {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.4;
+    font-style: italic;
+    opacity: 0.9;
+}
+
+.album-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 20px;
+    width: 100%;
+}
+
+/* --- Zoom Overlay for Photo Cards --- */
+.zoom-button-overlay {
+    position: absolute;
+    width: 44px;
+    height: 44px;
+    background: rgba(7, 9, 14, 0.75);
+    border: 1.5px solid white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 18px;
+    transition: var(--transition-smooth);
+    pointer-events: none;
+    z-index: 4;
+}
+
+.media-card:hover .zoom-button-overlay {
+    background: var(--accent-primary);
+    transform: scale(1.1);
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 10px rgba(0, 242, 195, 0.5);
+}
+
+/* --- Image Viewer in Modal --- */
+.video-player-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
 }

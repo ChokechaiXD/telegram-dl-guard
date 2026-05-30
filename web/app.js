@@ -17,10 +17,12 @@ const selectedCountEl = document.getElementById("selected-count");
 
 const btnSelectAll = document.getElementById("btn-select-all");
 const btnClearSelection = document.getElementById("btn-clear-selection");
+const btnForward = document.getElementById("btn-forward");
 const btnDownload = document.getElementById("btn-download");
 
 const videoModal = document.getElementById("video-modal");
 const modalVideoPlayer = document.getElementById("modal-video-player");
+const modalImageViewer = document.getElementById("modal-image-viewer");
 const modalTitle = document.getElementById("modal-title");
 const modalDesc = document.getElementById("modal-desc");
 
@@ -126,6 +128,71 @@ btnFetch.addEventListener("click", async () => {
 });
 
 // --- 5. Render Media Masonry Grid ---
+// Helper to create a single media card
+function createMediaCard(msg) {
+    const card = document.createElement("div");
+    card.className = "media-card";
+    card.setAttribute("data-msg-id", msg.msg_id);
+    
+    let previewContent = "";
+    const streamUrl = `/api/stream/${currentGroupId}/${msg.msg_id}`;
+    
+    if (msg.type === "photo") {
+        previewContent = `
+            <div class="zoom-button-overlay">🔍</div>
+            <img src="${streamUrl}" alt="Media Preview" class="preview-img" loading="lazy">
+        `;
+    } else if (msg.type === "video") {
+        const videoSrc = msg.has_thumb ? `/api/stream/${currentGroupId}/${msg.msg_id}/thumb` : "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='%2300b4d8'><path d='M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z'/></svg>";
+        const imgStyle = msg.has_thumb ? "" : "style='object-fit:scale-down; padding:30px; opacity:0.6;'";
+        previewContent = `
+            <div class="play-button-overlay">▶</div>
+            <img src="${videoSrc}" alt="Video Preview" class="preview-img" ${imgStyle} loading="lazy">
+        `;
+    } else {
+        previewContent = `<span class="card-placeholder-icon">📄</span>`;
+    }
+    
+    const badgeClass = msg.type === "photo" ? "badge-photo" : "badge-video";
+    const captionText = msg.caption ? msg.caption : "(No caption)";
+    
+    card.innerHTML = `
+        <div class="card-preview">
+            <span class="card-badge ${badgeClass}">${msg.type}</span>
+            <div class="card-selector"></div>
+            ${previewContent}
+        </div>
+        <div class="card-details">
+            <span class="card-title-text">${msg.filename}</span>
+            <span class="card-caption">${captionText}</span>
+            <div class="card-meta">
+                <span>${msg.sender}</span>
+                <span>${msg.size_str}</span>
+            </div>
+        </div>
+    `;
+    
+    card.addEventListener("click", (e) => {
+        if (e.target.classList.contains("card-selector") || e.target.closest(".card-selector")) {
+            toggleCardSelection(card, msg.msg_id);
+            return;
+        }
+        
+        if (e.target.closest(".card-preview")) {
+            openMediaModal(msg.type, streamUrl, msg.filename, msg.sender, msg.caption);
+            return;
+        }
+        
+        toggleCardSelection(card, msg.msg_id);
+    });
+    
+    if (selectedMsgIds.has(msg.msg_id)) {
+        card.classList.add("selected");
+    }
+    
+    return card;
+}
+
 function renderMediaGrid(messages) {
     mediaGrid.innerHTML = "";
     resultsCounter.textContent = `${messages.length} items found`;
@@ -140,58 +207,68 @@ function renderMediaGrid(messages) {
         return;
     }
     
+    // Group messages by grouped_id (Album grouping)
+    const groupedItems = [];
+    const albumMap = new Map();
+    
     messages.forEach(msg => {
-        const card = document.createElement("div");
-        card.className = "media-card";
-        card.setAttribute("data-msg-id", msg.msg_id);
-        
-        // Dynamic Preview Media Box
-        let previewContent = "";
-        const streamUrl = `/api/stream/${currentGroupId}/${msg.msg_id}`;
-        
-        if (msg.type === "photo") {
-            previewContent = `<img src="${streamUrl}" alt="Media Preview" class="preview-img" loading="lazy">`;
-        } else if (msg.type === "video") {
-            // High-performance HTML5 video dynamic stream loader
-            previewContent = `
-                <div class="play-button-overlay">▶</div>
-                <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='%2300b4d8'><path d='M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z'/></svg>" class="preview-img" style="object-fit:scale-down; padding:30px; opacity:0.6;">
-            `;
-        } else {
-            previewContent = `<span class="card-placeholder-icon">📄</span>`;
-        }
-        
-        const badgeClass = msg.type === "photo" ? "badge-photo" : "badge-video";
-        const captionText = msg.caption ? msg.caption : "(No caption)";
-        
-        card.innerHTML = `
-            <div class="card-preview">
-                <span class="card-badge ${badgeClass}">${msg.type}</span>
-                <div class="card-selector"></div>
-                ${previewContent}
-            </div>
-            <div class="card-details">
-                <span class="card-title-text">${msg.filename}</span>
-                <span class="card-caption">${captionText}</span>
-                <div class="card-meta">
-                    <span>${msg.sender}</span>
-                    <span>${msg.size_str}</span>
-                </div>
-            </div>
-        `;
-        
-        // Single Click to Toggle Individual Card Selection
-        card.addEventListener("click", (e) => {
-            // If clicking video play icon overlay, open the stream modal!
-            if (msg.type === "video" && e.target.classList.contains("play-button-overlay")) {
-                openVideoModal(streamUrl, msg.filename, msg.sender, msg.caption);
-                return;
+        if (msg.grouped_id) {
+            if (!albumMap.has(msg.grouped_id)) {
+                const album = {
+                    type: "album",
+                    grouped_id: msg.grouped_id,
+                    date: msg.date,
+                    sender: msg.sender,
+                    caption: msg.caption || "",
+                    messages: []
+                };
+                albumMap.set(msg.grouped_id, album);
+                groupedItems.push(album);
             }
+            const album = albumMap.get(msg.grouped_id);
+            album.messages.push(msg);
+            if (msg.caption && !album.caption) {
+                album.caption = msg.caption;
+            }
+        } else {
+            groupedItems.push({
+                type: "single",
+                msg: msg
+            });
+        }
+    });
+    
+    // Render grouped album blocks and single cards
+    groupedItems.forEach(item => {
+        if (item.type === "single") {
+            const card = createMediaCard(item.msg);
+            mediaGrid.appendChild(card);
+        } else if (item.type === "album") {
+            const container = document.createElement("div");
+            container.className = "album-container glass";
             
-            toggleCardSelection(card, msg.msg_id);
-        });
-        
-        mediaGrid.appendChild(card);
+            const header = document.createElement("div");
+            header.className = "album-header";
+            const captionHtml = item.caption ? `<div class="album-caption-text">${item.caption}</div>` : "";
+            header.innerHTML = `
+                <div class="album-title-row">
+                    <span class="album-badge">ALBUM GROUP</span>
+                    <span class="album-meta-info">${item.sender} • ${item.date}</span>
+                </div>
+                ${captionHtml}
+            `;
+            container.appendChild(header);
+            
+            const grid = document.createElement("div");
+            grid.className = "album-grid";
+            item.messages.forEach(msg => {
+                const card = createMediaCard(msg);
+                grid.appendChild(card);
+            });
+            container.appendChild(grid);
+            
+            mediaGrid.appendChild(container);
+        }
     });
 }
 
@@ -271,8 +348,14 @@ function setupLassoSelector() {
             const msgId = parseInt(card.getAttribute("data-msg-id"));
             
             // Get card positions relative to gridContainer
-            const cardLeft = card.offsetLeft;
-            const cardTop = card.offsetTop;
+            let cardLeft = card.offsetLeft;
+            let cardTop = card.offsetTop;
+            let parent = card.offsetParent;
+            while (parent && parent !== gridContainer) {
+                cardLeft += parent.offsetLeft;
+                cardTop += parent.offsetTop;
+                parent = parent.offsetParent;
+            }
             const cardRight = cardLeft + card.offsetWidth;
             const cardBottom = cardTop + card.offsetHeight;
             
@@ -322,6 +405,44 @@ function setupFloatingToolbar() {
         updateToolbarState();
     });
     
+    btnForward.addEventListener("click", async () => {
+        if (selectedMsgIds.size === 0) return;
+        
+        const payload = {
+            group_id: currentGroupId,
+            message_ids: Array.from(selectedMsgIds)
+        };
+        
+        btnForward.disabled = true;
+        btnForward.textContent = "Forwarding Files...";
+        
+        try {
+            const response = await fetch("/api/forward/bulk", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.detail || "Forward request failed");
+            }
+            const res = await response.json();
+            
+            alert(`Successfully forwarded ${res.forwarded_items} files directly to storage group!`);
+            selectedMsgIds.clear();
+            const cards = document.querySelectorAll(".media-card");
+            cards.forEach(card => card.classList.remove("selected"));
+            updateToolbarState();
+        } catch (error) {
+            console.error(error);
+            alert(`Forward Failed: ${error.message}`);
+        } finally {
+            btnForward.disabled = false;
+            btnForward.textContent = "Forward to Storage";
+        }
+    });
+
     btnDownload.addEventListener("click", async () => {
         if (selectedMsgIds.size === 0) return;
         
@@ -369,17 +490,36 @@ function updateToolbarState() {
     }
 }
 
-// --- 8. Video Modal Viewer ---
-function openVideoModal(url, title, sender, caption) {
-    modalVideoPlayer.src = url;
+// --- 8. Media Modal Viewer (Generalised) ---
+function openMediaModal(type, url, title, sender, caption) {
     modalTitle.textContent = title;
     modalDesc.textContent = `Sender: ${sender} | ${caption ? caption : 'No Caption'}`;
+    
+    if (type === "photo") {
+        modalVideoPlayer.style.display = "none";
+        modalVideoPlayer.pause();
+        modalVideoPlayer.src = "";
+        
+        modalImageViewer.src = url;
+        modalImageViewer.style.display = "block";
+    } else if (type === "video") {
+        modalImageViewer.style.display = "none";
+        modalImageViewer.src = "";
+        
+        modalVideoPlayer.src = url;
+        modalVideoPlayer.style.display = "block";
+        modalVideoPlayer.play();
+    }
+    
     videoModal.classList.add("visible");
-    modalVideoPlayer.play();
 }
 
 function closeVideoModal() {
     modalVideoPlayer.pause();
-    modalVideoPlayer.src = ""; // Unload stream to conserve bandwidth
+    modalVideoPlayer.src = "";
+    if (modalImageViewer) {
+        modalImageViewer.src = "";
+        modalImageViewer.style.display = "none";
+    }
     videoModal.classList.remove("visible");
 }

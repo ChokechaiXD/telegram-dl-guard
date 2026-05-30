@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from config import AppConfig
-from core.state import remove_entry, get_uploaded, purge_old_records
+from core.state import remove_entry, get_uploaded, purge_old_records, is_uploaded
 
 log = logging.getLogger("guard.cleanup")
 
@@ -72,6 +72,10 @@ async def _cleanup_task(get_cfg: Callable) -> None:
                 try:
                     age = now - path.stat().st_mtime
                     if age > retention:
+                        # Safety check: if upload is enabled, skip files not yet successfully uploaded
+                        if cfg.upload_enabled and not is_uploaded(str(path.resolve())):
+                            continue
+                            
                         path.unlink()
                         removed += 1
                         try:

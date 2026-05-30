@@ -30,7 +30,6 @@ class DashboardContainer(Container):
                         yield Button("Settings", id="btn-goto-settings", variant="default")
                         yield Button("Media Gallery", id="btn-goto-gallery", variant="default")
                     with Horizontal(classes="controls-row"):
-                        yield Button("Rules Builder", id="btn-goto-rules", variant="default")
                         yield Button("Visual Analytics", id="btn-goto-analytics", variant="default")
                         yield Button("Manual DL", id="btn-goto-selective", variant="default")
             

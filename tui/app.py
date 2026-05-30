@@ -19,7 +19,7 @@ from dotenv import set_key
 from core.state import GLOBAL_STATUS, ACTIVE_DOWNLOADS
 from core.utils import format_bytes
 
-from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, RulesBuilderContainer, SelectiveDownloaderContainer
+from tui.screens import DashboardContainer, SettingsContainer, GalleryContainer, AnalyticsContainer, SelectiveDownloaderContainer
 
 class SelectiveRow(Horizontal):
     """Clickable card box representing a fetched media item for selective downloader."""
@@ -46,7 +46,6 @@ class GuardApp(App):
         Binding("c", "cmd_config", "Toggle Settings"),
         Binding("g", "cmd_gallery", "Toggle Media Gallery"),
         Binding("a", "cmd_analytics", "Toggle Analytics"),
-        Binding("l", "cmd_rules", "Toggle Rules Manager"),
         Binding("m", "cmd_selective", "Manual Browser"),
         Binding("q", "quit", "Quit"),
     ]
@@ -57,7 +56,6 @@ class GuardApp(App):
         yield SettingsContainer(id="settings-container")
         yield GalleryContainer(id="gallery-container")
         yield AnalyticsContainer(id="analytics-container")
-        yield RulesBuilderContainer(id="rules-container")
         yield SelectiveDownloaderContainer(id="selective-container")
         yield Footer()
 
@@ -67,7 +65,6 @@ class GuardApp(App):
         self.query_one("#settings-container").styles.display = "none"
         self.query_one("#gallery-container").styles.display = "none"
         self.query_one("#analytics-container").styles.display = "none"
-        self.query_one("#rules-container").styles.display = "none"
         self.query_one("#selective-container").styles.display = "none"
 
         # Bind log callback
@@ -94,10 +91,6 @@ class GuardApp(App):
         # Fetched history messages buffer
         self._fetched_messages: dict = {}
 
-        # Rule Editor attributes
-        self._rules_list: list = []
-        self._editing_rule_index: int | None = None
-
         # Dirty-check state
         self._last_status = ""
         self._last_stats = ""
@@ -106,9 +99,6 @@ class GuardApp(App):
 
         self._refresh_dashboard()
         self.set_interval(2, self._refresh_dashboard)
-
-        # Populate rules.yaml into GUI builder
-        self.load_rules_to_ui()
 
         # Background thread properties
         self._listener_thread = None
@@ -253,9 +243,9 @@ class GuardApp(App):
         logging.getLogger("guard").info("🔍 Fetching target groups from Telegram dialogs Asynchronously...")
         
         try:
-            # Fetch all dialogues thread-safely
+            # Fetch all dialogues thread-safely with a 20-second timeout to prevent indefinite hangs
             future = asyncio.run_coroutine_threadsafe(self.client.get_dialogs(), self._background_loop)
-            dialogs = await asyncio.wrap_future(future)
+            dialogs = await asyncio.wait_for(asyncio.wrap_future(future), timeout=20.0)
             groups = [d for d in dialogs if d.is_group or d.is_channel]
             
             if not groups:
@@ -264,16 +254,24 @@ class GuardApp(App):
                 
             logging.getLogger("guard").info(f"✨ Found {len(groups)} groups/channels on your Telegram:")
             
-            from core.state import _conn, _db_lock
-            with _db_lock:
-                with _conn:
-                    for g in groups:
-                        logging.getLogger("guard").info(f"   Group: [bold cyan]{g.title}[/] | ID: [green]{g.id}[/]")
-                        _conn.execute("INSERT OR REPLACE INTO group_cache (group_id, group_title) VALUES (?, ?)", (g.id, g.title))
+            for g in groups:
+                logging.getLogger("guard").info(f"   Group: [bold cyan]{g.title}[/] | ID: [green]{g.id}[/]")
+                
+            # Perform SQLite writing in a background thread to prevent blocking/freezing the Textual main TUI thread
+            import core.state as cs
+            groups_to_save = [(g.id, g.title or "Untitled") for g in groups]
+            await asyncio.to_thread(cs.save_cached_groups, groups_to_save)
+            
+            # Dynamically refresh the settings checkboxes and dropdowns with the newly synced groups immediately
+            self.call_after_refresh(self.load_config_to_ui)
             
             self.notify("Sync complete! Group list printed in the Logs panel.", title="Groups Synced")
+        except asyncio.TimeoutError:
+            self.notify("Sync failed: Request timed out. Telegram might be slow or rate-limiting.", severity="error", title="Sync Timeout")
+            logging.getLogger("guard").error("❌ Group sync timed out. Telegram connection might be congested.")
         except Exception as e:
             self.notify(f"Sync failed: {e}", severity="error", title="Sync Failed")
+            logging.getLogger("guard").error(f"❌ Group sync failed: {e}")
 
     _LOG_STYLES = {
         "error": "bold red",
@@ -432,13 +430,11 @@ class GuardApp(App):
         settings = self.query_one("#settings-container")
         gallery = self.query_one("#gallery-container")
         analytics = self.query_one("#analytics-container")
-        rules = self.query_one("#rules-container")
         
         if dash.styles.display == "block":
             dash.styles.display = "none"
             settings.styles.display = "none"
             gallery.styles.display = "none"
-            rules.styles.display = "none"
             analytics.styles.display = "block"
             self.title = "Telegram DL Guard Visual Analytics"
             asyncio.create_task(self.refresh_analytics_screen())
@@ -446,30 +442,6 @@ class GuardApp(App):
             analytics.styles.display = "none"
             settings.styles.display = "none"
             gallery.styles.display = "none"
-            rules.styles.display = "none"
-            dash.styles.display = "block"
-            self.title = "Telegram DL Guard Dashboard"
-
-    def toggle_rules(self) -> None:
-        dash = self.query_one("#dashboard-container")
-        settings = self.query_one("#settings-container")
-        gallery = self.query_one("#gallery-container")
-        analytics = self.query_one("#analytics-container")
-        rules = self.query_one("#rules-container")
-        
-        if dash.styles.display == "block":
-            dash.styles.display = "none"
-            settings.styles.display = "none"
-            gallery.styles.display = "none"
-            analytics.styles.display = "none"
-            rules.styles.display = "block"
-            self.title = "Telegram DL Guard Rule Builder"
-            self.load_rules_to_ui()
-        else:
-            rules.styles.display = "none"
-            settings.styles.display = "none"
-            gallery.styles.display = "none"
-            analytics.styles.display = "none"
             dash.styles.display = "block"
             self.title = "Telegram DL Guard Dashboard"
 
@@ -478,7 +450,6 @@ class GuardApp(App):
         settings = self.query_one("#settings-container")
         gallery = self.query_one("#gallery-container")
         analytics = self.query_one("#analytics-container")
-        rules = self.query_one("#rules-container")
         selective = self.query_one("#selective-container")
         
         if dash.styles.display == "block":
@@ -486,17 +457,13 @@ class GuardApp(App):
             settings.styles.display = "none"
             gallery.styles.display = "none"
             analytics.styles.display = "none"
-            rules.styles.display = "none"
             selective.styles.display = "block"
             self.title = "Telegram DL Guard Manual Browser"
             
             # Populate Target Groups dropdown inside history browser screen
             try:
-                import sqlite3
-                conn = sqlite3.connect("logs/guard.db")
-                cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
-                db_groups = cursor.fetchall()
-                conn.close()
+                import core.state as cs
+                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
                 
                 options = []
                 for gid, title in db_groups:
@@ -519,197 +486,8 @@ class GuardApp(App):
             settings.styles.display = "none"
             gallery.styles.display = "none"
             analytics.styles.display = "none"
-            rules.styles.display = "none"
             dash.styles.display = "block"
             self.title = "Telegram DL Guard Dashboard"
-
-    def load_rules_to_ui(self) -> None:
-        try:
-            from core.rules import load_rules
-            self._rules_list = load_rules()
-            self.render_rules_list()
-        except Exception as ex:
-            self.notify(f"Failed to load rules: {ex}", severity="error")
-
-    def render_rules_list(self) -> None:
-        try:
-            box = self.query_one("#rules-list-box")
-            box.remove_children()
-            
-            if not self._rules_list:
-                box.mount(Static("\n[dim]No rules found. Construct one using the editor on the right![/]\n", id="empty-rules-label"))
-                return
-                
-            for idx, r in enumerate(self._rules_list):
-                status_text = "Enabled" if r.enabled else "Disabled"
-                
-                conds = []
-                c = r.condition
-                if c.media_type: conds.append(f"media={c.media_type}")
-                if c.sender: conds.append(f"sender={c.sender}")
-                if c.sender_contains: conds.append(f"contains={c.sender_contains}")
-                if c.filename_regex: conds.append(f"regex={c.filename_regex}")
-                if c.file_size_gt is not None: conds.append(f"size>{c.file_size_gt//1024}KB")
-                if c.file_size_lt is not None: conds.append(f"size<{c.file_size_lt//1024}KB")
-                if c.source_group: conds.append(f"group={c.source_group}")
-                
-                acts = []
-                a = r.action
-                if a.skip: acts.append("SKIP")
-                if a.priority: acts.append("PRIORITY")
-                if a.tag: acts.append(f"tag={a.tag}")
-                if a.move_to: acts.append(f"move={a.move_to}")
-                if a.album: acts.append("album")
-                
-                cond_str = ", ".join(conds) or "Any"
-                act_str = ", ".join(acts) or "None"
-                
-                card_content = (
-                    f"[bold cyan]{idx + 1}. {r.name}[/] [dim]({status_text})[/]\n"
-                    f"[dim]WHEN:[/] {cond_str} ──> [bold yellow]THEN:[/] {act_str}"
-                )
-                
-                card_text = Static(card_content, classes="rule-card-info")
-                btn_up = Button("▲", variant="default", id=f"rule-up-{idx}", classes="btn-rule-arrow")
-                btn_down = Button("▼", variant="default", id=f"rule-down-{idx}", classes="btn-rule-arrow")
-                btn_edit = Button("Edit", variant="primary", id=f"rule-edit-{idx}", classes="btn-rule-action")
-                btn_del = Button("Del", variant="error", id=f"rule-del-{idx}", classes="btn-rule-action")
-                
-                card_row = Horizontal(
-                    card_text, btn_up, btn_down, btn_edit, btn_del,
-                    classes="rule-card-row", id=f"rule-card-row-{idx}"
-                )
-                box.mount(card_row)
-        except Exception as e:
-            logging.getLogger("guard").error(f"Rule render error: {e}")
-
-    def edit_rule(self, idx: int) -> None:
-        try:
-            self._editing_rule_index = idx
-            rule = self._rules_list[idx]
-            
-            self.query_one("#rule-name", Input).value = rule.name
-            self.query_one("#rule-enabled", Switch).value = rule.enabled
-            
-            self.query_one("#rule-cond-media", Select).value = rule.condition.media_type or "any"
-            self.query_one("#rule-cond-sender", Input).value = rule.condition.sender or ""
-            self.query_one("#rule-cond-sender-contains", Input).value = rule.condition.sender_contains or ""
-            self.query_one("#rule-cond-regex", Input).value = rule.condition.filename_regex or ""
-            
-            if rule.condition.file_size_gt is not None:
-                self.query_one("#rule-cond-size-op", Select).value = "gt"
-                self.query_one("#rule-cond-size-val", Input).value = str(rule.condition.file_size_gt // 1024)
-            elif rule.condition.file_size_lt is not None:
-                self.query_one("#rule-cond-size-op", Select).value = "lt"
-                self.query_one("#rule-cond-size-val", Input).value = str(rule.condition.file_size_lt // 1024)
-            else:
-                self.query_one("#rule-cond-size-op", Select).value = "any"
-                self.query_one("#rule-cond-size-val", Input).value = ""
-                
-            self.query_one("#rule-cond-group", Input).value = rule.condition.source_group or ""
-            
-            self.query_one("#rule-act-skip", Switch).value = rule.action.skip
-            self.query_one("#rule-act-priority", Switch).value = rule.action.priority
-            self.query_one("#rule-act-tag", Input).value = rule.action.tag or ""
-            self.query_one("#rule-act-move", Input).value = rule.action.move_to or ""
-            self.query_one("#rule-act-album", Switch).value = rule.action.album
-            
-            self.notify(f"Loaded rule: {rule.name} for editing.")
-        except Exception as e:
-            self.notify(f"Failed to load rule details: {e}", severity="error")
-
-    def clear_rule_form(self) -> None:
-        self._editing_rule_index = None
-        self.query_one("#rule-name", Input).value = ""
-        self.query_one("#rule-enabled", Switch).value = True
-        self.query_one("#rule-cond-media", Select).value = "any"
-        self.query_one("#rule-cond-sender", Input).value = ""
-        self.query_one("#rule-cond-sender-contains", Input).value = ""
-        self.query_one("#rule-cond-regex", Input).value = ""
-        self.query_one("#rule-cond-size-op", Select).value = "any"
-        self.query_one("#rule-cond-size-val", Input).value = ""
-        self.query_one("#rule-cond-group", Input).value = ""
-        
-        self.query_one("#rule-act-skip", Switch).value = False
-        self.query_one("#rule-act-priority", Switch).value = False
-        self.query_one("#rule-act-tag", Input).value = ""
-        self.query_one("#rule-act-move", Input).value = ""
-        self.query_one("#rule-act-album", Switch).value = False
-
-    def save_rule_form(self) -> None:
-        name = self.query_one("#rule-name", Input).value.strip()
-        if not name:
-            self.notify("Rule name cannot be empty.", severity="error")
-            return
-            
-        enabled = self.query_one("#rule-enabled", Switch).value
-        
-        from core.rules import Rule, RuleCondition, RuleAction
-        
-        media = self.query_one("#rule-cond-media", Select).value
-        media_val = str(media).strip() if (media and str(media) != "Select.BLANK" and media != "any") else None
-        
-        sender = self.query_one("#rule-cond-sender", Input).value.strip() or None
-        sender_contains = self.query_one("#rule-cond-sender-contains", Input).value.strip() or None
-        regex = self.query_one("#rule-cond-regex", Input).value.strip() or None
-        
-        size_op = self.query_one("#rule-cond-size-op", Select).value
-        size_val_str = self.query_one("#rule-cond-size-val", Input).value.strip()
-        size_bytes = None
-        if size_val_str.isdigit():
-            size_bytes = int(size_val_str) * 1024
-            
-        size_gt = size_bytes if size_op == "gt" else None
-        size_lt = size_bytes if size_op == "lt" else None
-        
-        group = self.query_one("#rule-cond-group", Input).value.strip() or None
-        
-        cond = RuleCondition(
-            sender=sender,
-            sender_contains=sender_contains,
-            filename_regex=regex,
-            media_type=media_val,
-            file_size_gt=size_gt,
-            file_size_lt=size_lt,
-            source_group=group
-        )
-        
-        skip = self.query_one("#rule-act-skip", Switch).value
-        priority = self.query_one("#rule-act-priority", Switch).value
-        tag = self.query_one("#rule-act-tag", Input).value.strip() or None
-        move = self.query_one("#rule-act-move", Input).value.strip() or None
-        album = self.query_one("#rule-act-album", Switch).value
-        
-        act = RuleAction(
-            skip=skip,
-            tag=tag,
-            album=album,
-            priority=priority,
-            move_to=move
-        )
-        
-        new_rule = Rule(name=name, condition=cond, action=act, enabled=enabled)
-        
-        if self._editing_rule_index is None:
-            self._rules_list.append(new_rule)
-            self.notify(f"Added new rule: {name}")
-        else:
-            self._rules_list[self._editing_rule_index] = new_rule
-            self.notify(f"Updated rule: {name}")
-            self._editing_rule_index = None
-            
-        self.clear_rule_form()
-        self.render_rules_list()
-
-    def apply_rules_to_yaml(self) -> None:
-        try:
-            from core.rules import save_rules_to_yaml
-            save_rules_to_yaml(self._rules_list)
-            self.notify("Rules saved successfully! Restarting engine...", title="Rules Builder")
-            asyncio.create_task(self.restart_listener_engine())
-            self.toggle_rules()
-        except Exception as e:
-            self.notify(f"Failed to apply rules: {e}", severity="error", title="Rules Builder")
 
     async def refresh_analytics_screen(self) -> None:
         try:
@@ -854,12 +632,12 @@ class GuardApp(App):
                     f"    [dim]From:[/] {sender} | [dim]Date:[/] {date_str}"
                 )
                 
-                card_text = Static(content, classes="rule-card-info")
+                card_text = Static(content, classes="selective-card-info")
                 checkbox = Checkbox(value=False, id=f"grp_check_{msg.id}")
                 
                 row = SelectiveRow(
                     checkbox, card_text,
-                    classes="rule-card-row selective-row", id=f"sel-row-{msg.id}"
+                    classes="selective-card-row selective-row", id=f"sel-row-{msg.id}"
                 )
                 box.mount(row)
                 
@@ -900,12 +678,8 @@ class GuardApp(App):
         group_id_str = str(group_id_val).strip() if (group_id_val and str(group_id_val) != "Select.BLANK" and group_id_val != getattr(Select, "BLANK", None)) else ""
         
         try:
-            import sqlite3
-            conn = sqlite3.connect("logs/guard.db")
-            cursor = conn.execute("SELECT group_title FROM group_cache WHERE group_id = ?", (group_id_str,))
-            row = cursor.fetchone()
-            conn.close()
-            group_title = row[0] if row else group_id_str
+            import core.state as cs
+            group_title = cs.get_group_title(group_id_str) or group_id_str
         except Exception:
             group_title = group_id_str
             
@@ -929,24 +703,9 @@ class GuardApp(App):
                 fname = _media_name(msg.media, msg.date, msg.id)
                 fpath = target_dir / fname
                 
-                # Check rules or standard paths
+                # Check standard paths
                 original_caption = (getattr(msg, "message", None) or "").strip()
                 rule_priority = False
-                
-                if dh._rules and not getattr(cfg, "super_grabber_mode", False):
-                    from core.rules import evaluate_rules
-                    fsize = getattr(getattr(msg.media, "document", None), "size", 0) or 0
-                    rule_action = evaluate_rules(dh._rules, sender, fname, mt, fsize, group_title)
-                    if rule_action:
-                        if rule_action.skip:
-                            continue
-                        rule_priority = rule_action.priority
-                        if rule_action.tag:
-                            if original_caption and f"#{rule_action.tag}" not in original_caption:
-                                original_caption = f"{original_caption} #{rule_action.tag}".strip()
-                        if rule_action.move_to:
-                            from core.rules import move_to_folder
-                            fpath = move_to_folder(fpath, rule_action.move_to)
                             
                 fpath = _resolve_download_path(fpath, getattr(getattr(msg.media, "document", None), "size", 0) or None, msg.id)
                 if fpath is None:
@@ -981,11 +740,8 @@ class GuardApp(App):
             self.query_one("#setting-api-hash", Input).value = str(cfg.api_hash or "")
             # Target Groups Checkbox list row
             try:
-                import sqlite3
-                conn = sqlite3.connect("logs/guard.db")
-                cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
-                db_groups = cursor.fetchall()
-                conn.close()
+                import core.state as cs
+                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
                 
                 active_gids = {g.strip() for g in (cfg.target_groups or "").split(",") if g.strip()}
                 
@@ -1011,11 +767,8 @@ class GuardApp(App):
             
             # Populate Storage Group Select options from SQLite
             try:
-                import sqlite3
-                conn = sqlite3.connect("logs/guard.db")
-                cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
-                db_groups = cursor.fetchall()
-                conn.close()
+                import core.state as cs
+                db_groups = [(int(g["id"]), g["title"]) for g in cs.get_cached_groups()]
                 
                 options = []
                 for gid, title in db_groups:
@@ -1054,6 +807,9 @@ class GuardApp(App):
                 
             curr_qs = str(cfg.queue_size or "3").strip()
             self.query_one("#setting-queue-size", Select).value = curr_qs if curr_qs in [str(i) for i in range(1, 11)] else "3"
+            
+            curr_pm = str(cfg.processing_mode or "download").strip()
+            self.query_one("#setting-processing-mode", Select).value = curr_pm if curr_pm in ("download", "forward") else "download"
             
             # Group 3: Dedup
             self.query_one("#setting-dedup-enabled", Switch).value = cfg.dedup_enabled
@@ -1235,6 +991,9 @@ class GuardApp(App):
             queue_select_val = self.query_one("#setting-queue-size", Select).value
             queue_size = str(queue_select_val).strip() if (queue_select_val and str(queue_select_val) != "Select.BLANK" and queue_select_val != getattr(Select, "BLANK", None)) else "3"
             
+            processing_mode_val = self.query_one("#setting-processing-mode", Select).value
+            processing_mode = str(processing_mode_val).strip() if (processing_mode_val and str(processing_mode_val) != "Select.BLANK" and processing_mode_val != getattr(Select, "BLANK", None)) else "download"
+            
             # Group 3: Dedup
             dedup_enabled = self.query_one("#setting-dedup-enabled", Switch).value
             dedup_method = self.query_one("#setting-dedup-method", Select).value
@@ -1309,6 +1068,7 @@ class GuardApp(App):
             set_key(".env", "DOWNLOAD_DIR", download_dir)
             set_key(".env", "MEDIA_TYPES", media_types)
             set_key(".env", "QUEUE_SIZE", queue_size)
+            set_key(".env", "PROCESSING_MODE", processing_mode)
             set_key(".env", "DEDUP_ENABLED", "true" if dedup_enabled else "false")
             set_key(".env", "DEDUP_METHOD", str(dedup_method))
             set_key(".env", "REDOWNLOAD", str(redownload))
@@ -1531,55 +1291,6 @@ class GuardApp(App):
                 self.notify("Invalid cancel target.", severity="error")
             return
 
-        # Rule Builder Arrow Up Action
-        if btn_id and btn_id.startswith("rule-up-"):
-            try:
-                idx = int(btn_id.split("-")[-1])
-                if idx > 0:
-                    self._rules_list[idx], self._rules_list[idx - 1] = self._rules_list[idx - 1], self._rules_list[idx]
-                    self.render_rules_list()
-                    self.notify("Rule priority increased.")
-            except Exception as e:
-                self.notify(f"Error moving rule up: {e}", severity="error")
-            return
-
-        # Rule Builder Arrow Down Action
-        if btn_id and btn_id.startswith("rule-down-"):
-            try:
-                idx = int(btn_id.split("-")[-1])
-                if idx < len(self._rules_list) - 1:
-                    self._rules_list[idx], self._rules_list[idx + 1] = self._rules_list[idx + 1], self._rules_list[idx]
-                    self.render_rules_list()
-                    self.notify("Rule priority decreased.")
-            except Exception as e:
-                self.notify(f"Error moving rule down: {e}", severity="error")
-            return
-
-        # Rule Builder Edit Action
-        if btn_id and btn_id.startswith("rule-edit-"):
-            try:
-                idx = int(btn_id.split("-")[-1])
-                self.edit_rule(idx)
-            except Exception as e:
-                self.notify(f"Error editing rule: {e}", severity="error")
-            return
-
-        # Rule Builder Delete Action
-        if btn_id and btn_id.startswith("rule-del-"):
-            try:
-                idx = int(btn_id.split("-")[-1])
-                rule_name = self._rules_list[idx].name
-                del self._rules_list[idx]
-                if self._editing_rule_index == idx:
-                    self.clear_rule_form()
-                elif self._editing_rule_index is not None and self._editing_rule_index > idx:
-                    self._editing_rule_index -= 1
-                self.render_rules_list()
-                self.notify(f"Deleted rule: {rule_name}", severity="warning")
-            except Exception as e:
-                self.notify(f"Error deleting rule: {e}", severity="error")
-            return
-
         if btn_id == "btn-start":
             if not self.listener_task:
                 self.notify("Starting Telegram DL Guard Listener Engine...", title="Status Update")
@@ -1597,8 +1308,6 @@ class GuardApp(App):
             self.toggle_settings()
         elif btn_id == "btn-goto-gallery" or btn_id == "btn-back-gallery":
             asyncio.create_task(self.toggle_gallery())
-        elif btn_id == "btn-goto-rules" or btn_id == "btn-back-rules":
-            self.toggle_rules()
         elif btn_id == "btn-goto-analytics" or btn_id == "btn-back-analytics":
             self.toggle_analytics()
         elif btn_id == "btn-goto-selective" or btn_id == "btn-back-selective":
@@ -1613,19 +1322,6 @@ class GuardApp(App):
             self.load_raw_file_to_ui()
         elif btn_id == "btn-save-raw-file":
             self.save_raw_file_from_ui()
-        elif btn_id == "btn-rule-new":
-            self.clear_rule_form()
-            self.notify("Form cleared. Input details for new rule.")
-        elif btn_id == "btn-rule-reload":
-            self.load_rules_to_ui()
-            self.notify("Reloaded rules from disk.")
-        elif btn_id == "btn-rule-save":
-            self.save_rule_form()
-        elif btn_id == "btn-rule-cancel":
-            self.clear_rule_form()
-            self.notify("Edit cancelled.")
-        elif btn_id == "btn-apply-rules-yaml":
-            self.apply_rules_to_yaml()
         elif btn_id == "btn-refresh-analytics":
             asyncio.create_task(self.refresh_analytics_screen())
             self.notify("Refreshed system metrics.")
@@ -1676,9 +1372,6 @@ class GuardApp(App):
 
     def action_cmd_analytics(self) -> None:
         self.toggle_analytics()
-
-    def action_cmd_rules(self) -> None:
-        self.toggle_rules()
 
     def action_cmd_selective(self) -> None:
         self.toggle_selective()

@@ -733,3 +733,57 @@ def get_daily_stats_last_7_days() -> list[tuple[str, int, int]]:
         results.append((d, stats[d]["count"], stats[d]["bytes"]))
     return results
 
+
+def get_cached_groups() -> list[dict[str, str]]:
+    """Return all cached groups from SQLite cache."""
+    global _conn
+    results = []
+    with _db_lock:
+        try:
+            cursor = _conn.execute("SELECT group_id, group_title FROM group_cache")
+            for row in cursor.fetchall():
+                results.append({"id": str(row[0]), "title": row[1]})
+        except Exception as e:
+            log.error("Failed to query cached groups: %s", e)
+    return results
+
+
+def save_cached_groups(groups: list[tuple[int, str]]) -> None:
+    """Save group caches in bulk to SQLite cache in a thread-safe manner."""
+    global _conn
+    with _db_lock:
+        try:
+            with _conn:
+                _conn.executemany("INSERT OR REPLACE INTO group_cache (group_id, group_title) VALUES (?, ?)", groups)
+        except Exception as e:
+            log.error("Failed to save cached groups in bulk: %s", e)
+
+
+def get_group_title(group_id: str | int) -> str | None:
+    """Resolve a group's title from tracker history or group cache."""
+    global _conn
+    gid_int = None
+    gid_str = str(group_id)
+    try:
+        gid_int = int(group_id)
+    except ValueError:
+        pass
+    
+    with _db_lock:
+        try:
+            # 1. Try resolving from tracker history using source_group text
+            cursor = _conn.execute("SELECT source_group FROM download_tracker WHERE source_group = ? OR source_group = ? LIMIT 1", (gid_str, f"Group ID: {gid_str}"))
+            row = cursor.fetchone()
+            if row and row[0] and not row[0].isdigit() and not row[0].startswith("Group ID:"):
+                return row[0]
+                
+            # 2. Try resolving from group_cache if int ID exists
+            if gid_int is not None:
+                cursor = _conn.execute("SELECT group_title FROM group_cache WHERE group_id = ?", (gid_int,))
+                row = cursor.fetchone()
+                if row:
+                    return row[0]
+        except Exception as e:
+            log.error("Failed to resolve group title from DB: %s", e)
+    return None
+

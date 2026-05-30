@@ -6,7 +6,6 @@ import socket
 import asyncio
 import logging
 import webbrowser
-import sqlite3
 from pathlib import Path
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
@@ -135,36 +134,19 @@ async def get_groups():
     if not client:
         raise HTTPException(status_code=500, detail="Telegram client not initialized.")
         
-    db_path = Path("logs/guard.db")
-    groups = []
+    groups = cs.get_cached_groups()
     
-    try:
-        if db_path.exists():
-            conn = sqlite3.connect(db_path)
-            cursor = conn.execute("SELECT group_id, group_title FROM group_cache")
-            db_groups = cursor.fetchall()
-            conn.close()
-            for gid, title in db_groups:
-                groups.append({"id": str(gid), "title": title})
-    except Exception as e:
-        log.error(f"Error loading group cache: {e}")
-        
     # If cache is empty, query live dialogs and populate cache
     if not groups:
         try:
             log.info("Group cache is empty. Fetching live dialogs from Telegram...")
             live_dialogs = [d async for d in client.iter_dialogs() if d.is_group or d.is_channel]
             
-            # Persist to SQLite
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(db_path)
-            conn.execute("CREATE TABLE IF NOT EXISTS group_cache (group_id INTEGER PRIMARY KEY, group_title TEXT)")
-            for g in live_dialogs:
-                title = g.title or "Untitled"
-                conn.execute("INSERT OR REPLACE INTO group_cache (group_id, group_title) VALUES (?, ?)", (g.id, title))
-                groups.append({"id": str(g.id), "title": title})
-            conn.commit()
-            conn.close()
+            # Persist to SQLite using centralized helper
+            groups_to_save = [(g.id, g.title or "Untitled") for g in live_dialogs]
+            cs.save_cached_groups(groups_to_save)
+            
+            groups = [{"id": str(g[0]), "title": g[1]} for g in groups_to_save]
         except Exception as e:
             log.error(f"Failed to fetch live dialogs: {e}")
             raise HTTPException(status_code=500, detail="Failed to fetch channels from Telegram.")
@@ -211,7 +193,9 @@ async def get_history(group_id: str, limit: int = 100, q: str = None, type: str 
                 "size": fsize,
                 "size_str": format_bytes(fsize) if fsize else "Unknown",
                 "type": mt,
-                "caption": msg.message.strip() if msg.message else ""
+                "caption": msg.message.strip() if msg.message else "",
+                "grouped_id": getattr(msg, "grouped_id", None),
+                "has_thumb": bool(getattr(getattr(msg.media, "document", None), "thumbs", None))
             })
     except Exception as e:
         log.error(f"Error fetching history: {e}")
@@ -220,8 +204,8 @@ async def get_history(group_id: str, limit: int = 100, q: str = None, type: str 
     return JSONResponse(content=results)
 
 @app.get("/api/stream/{group_id}/{msg_id}")
-async def stream_media(group_id: str, msg_id: int):
-    """Dynamic Telegram Chunk Streaming: streams external media directly from Telegram's servers chunk-by-chunk."""
+async def stream_media(group_id: str, msg_id: int, request: Request):
+    """Dynamic Telegram Chunk Streaming: streams external media directly from Telegram's servers chunk-by-chunk with HTTP Range request support."""
     if not client:
         raise HTTPException(status_code=500, detail="Telegram client not connected.")
         
@@ -251,15 +235,123 @@ async def stream_media(group_id: str, msg_id: int):
         doc = getattr(msg.media, "document", None)
         mime = doc.mime_type if (doc and doc.mime_type) else "application/octet-stream"
         
-    # High-performance chunk-by-chunk streaming generator
+    # Get total file size to process range headers accurately
+    file_size = getattr(getattr(msg.media, "document", None), "size", 0) or 0
+    if not file_size and mt == "photo":
+        photo = getattr(msg.media, "photo", None)
+        if photo and getattr(photo, "sizes", None):
+            file_size = photo.sizes[-1].size or 0
+            
+    range_header = request.headers.get("Range") or request.headers.get("range")
+    start = 0
+    end = file_size - 1 if file_size > 0 else 0
+    is_range = False
+    
+    if range_header and file_size > 0:
+        try:
+            range_val = range_header.replace("bytes=", "").strip()
+            parts = range_val.split("-")
+            if parts[0]:
+                start = int(parts[0])
+            if len(parts) > 1 and parts[1]:
+                end = int(parts[1])
+            
+            # Bound boundaries within valid file size limits
+            if start < 0:
+                start = 0
+            if end >= file_size:
+                end = file_size - 1
+            if start <= end:
+                is_range = True
+        except Exception as ex:
+            log.warning(f"Failed parsing range header {range_header} for message {msg_id}: {ex}")
+            
+    # High-performance chunk-by-chunk streaming generator supporting range boundaries
+    async def chunk_generator(offset: int, total_to_read: int):
+        bytes_read = 0
+        try:
+            async for chunk in client.iter_download(msg.media, offset=offset):
+                if bytes_read >= total_to_read:
+                    break
+                
+                remaining = total_to_read - bytes_read
+                if len(chunk) > remaining:
+                    yield chunk[:remaining]
+                    bytes_read += remaining
+                    break
+                else:
+                    yield chunk
+                    bytes_read += len(chunk)
+        except Exception as ex:
+            log.error(f"Streaming interrupted for message {msg_id} at offset {offset}: {ex}")
+            
+    headers = {
+        "Accept-Ranges": "bytes",
+    }
+    
+    if is_range:
+        total_to_read = end - start + 1
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        headers["Content-Length"] = str(total_to_read)
+        status_code = 206
+    else:
+        total_to_read = file_size - start if file_size > 0 else 0
+        if file_size > 0:
+            headers["Content-Length"] = str(total_to_read)
+        status_code = 200
+        
+    return StreamingResponse(
+        chunk_generator(start, total_to_read) if total_to_read > 0 else chunk_generator(0, 0),
+        media_type=mime,
+        headers=headers,
+        status_code=status_code
+    )
+
+@app.get("/api/stream/{group_id}/{msg_id}/thumb")
+async def stream_media_thumb(group_id: str, msg_id: int):
+    """Streams the thumbnail of a video/document directly from Telegram's servers Asynchronously."""
+    if not client:
+        raise HTTPException(status_code=500, detail="Telegram client not connected.")
+        
+    try:
+        gid = int(group_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid group ID.")
+        
+    try:
+        entity = await client.get_entity(gid)
+        msg = await client.get_messages(entity, ids=msg_id)
+    except Exception as e:
+        log.error(f"Failed to fetch message {msg_id}: {e}")
+        raise HTTPException(status_code=404, detail="Media message not found.")
+        
+    if not msg or not msg.media:
+        raise HTTPException(status_code=404, detail="Message does not contain media.")
+        
+    doc = getattr(msg.media, "document", None)
+    if not doc or not getattr(doc, "thumbs", None):
+        raise HTTPException(status_code=404, detail="No thumbnail available for this document.")
+        
+    # Get the best/largest thumbnail
+    thumb = doc.thumbs[-1]
+    
+    try:
+        # Direct download of thumbnail bytes to support stripped and cached sizes natively
+        data = await client.download_media(msg.media, thumb=thumb)
+        if data and isinstance(data, bytes):
+            return Response(content=data, media_type="image/jpeg")
+    except Exception as ex:
+        log.error(f"Thumbnail download failed via download_media: {ex}")
+    
+    # High-performance chunk-by-chunk streaming generator for thumbnail (Fallback)
     async def chunk_generator():
         try:
-            async for chunk in client.iter_download(msg.media):
+            async for chunk in client.iter_download(msg.media, thumb=thumb):
                 yield chunk
         except Exception as ex:
-            log.error(f"Streaming interrupted for message {msg_id}: {ex}")
+            log.error(f"Thumbnail streaming interrupted for message {msg_id}: {ex}")
             
-    return StreamingResponse(chunk_generator(), media_type=mime)
+    return StreamingResponse(chunk_generator(), media_type="image/jpeg")
 
 class BulkDownloadRequest(BaseModel):
     group_id: str
@@ -300,18 +392,7 @@ async def bulk_download(req: BulkDownloadRequest):
     ddir = Path(cfg.download_dir)
     
     # Retrieve target group title for logging/captions
-    group_title = req.group_id
-    try:
-        db_path = Path("logs/guard.db")
-        if db_path.exists():
-            conn = sqlite3.connect(db_path)
-            cursor = conn.execute("SELECT group_title FROM group_cache WHERE group_id = ?", (req.group_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if row:
-                group_title = row[0]
-    except Exception:
-        pass
+    group_title = cs.get_group_title(req.group_id) or req.group_id
         
     queued_count = 0
     
@@ -344,6 +425,49 @@ async def bulk_download(req: BulkDownloadRequest):
         queued_count += 1
         
     return JSONResponse(content={"status": "ok", "queued_items": queued_count})
+
+class BulkForwardRequest(BaseModel):
+    group_id: str
+    message_ids: List[int]
+
+@app.post("/api/forward/bulk")
+async def bulk_forward(req: BulkForwardRequest):
+    """Forward selected messages directly to the configured storage group on Telegram's servers."""
+    if not client:
+        raise HTTPException(status_code=500, detail="Telegram client not connected.")
+        
+    cfg = AppConfig.load()
+    if not cfg.storage_group_id:
+        raise HTTPException(status_code=400, detail="Storage group ID is not configured in configuration.")
+        
+    try:
+        storage_id = int(cfg.storage_group_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid storage group ID format in configuration.")
+        
+    try:
+        from_gid = int(req.group_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid source group ID.")
+        
+    try:
+        source_entity = await client.get_entity(from_gid)
+        storage_entity = await client.get_entity(storage_id)
+    except Exception as e:
+        log.error(f"Failed to resolve entity: {e}")
+        raise HTTPException(status_code=404, detail="Could not resolve source or storage group entity.")
+        
+    try:
+        forwarded = await client.forward_messages(storage_entity, req.message_ids, source_entity)
+        if isinstance(forwarded, list):
+            success_count = sum(1 for m in forwarded if m is not None)
+        else:
+            success_count = 1 if forwarded is not None else 0
+            
+        return JSONResponse(content={"status": "ok", "forwarded_items": success_count})
+    except Exception as e:
+        log.error(f"Failed to forward messages: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to forward messages: {str(e)}")
 
 # Serve Static Frontend Files
 web_dir = Path("web")

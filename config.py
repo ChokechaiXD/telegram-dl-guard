@@ -86,6 +86,7 @@ class AppConfig:
     # Telegram
     target_groups: str = ""
     media_types: str = "photo,video"
+    processing_mode: str = "download"
 
     # Paths
     download_dir: str = "./downloads"
@@ -147,6 +148,7 @@ class AppConfig:
             session_string=_get("SESSION_STRING", "session_string", ""),
             target_groups=_get("TARGET_GROUPS", "target_groups", ""),
             media_types=_get("MEDIA_TYPES", "media_types", "photo,video"),
+            processing_mode=_get("PROCESSING_MODE", "processing_mode", "download"),
             download_dir=_get("DOWNLOAD_DIR", "download_dir", "./downloads"),
             folder_date_format=_get("FOLDER_DATE_FORMAT", "folder_date_format", "%Y%m%d_%H%M"),
             dedup_enabled=_get_bool("DEDUP_ENABLED", "dedup.enabled", True),

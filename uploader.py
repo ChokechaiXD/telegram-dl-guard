@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
 import random
 from collections import defaultdict
+
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +27,7 @@ from telethon.tl.types import (
 
 from core.state import is_uploaded, mark_uploaded, mark_pending, ACTIVE_UPLOADS, GLOBAL_STATUS
 from core.download_handler import _file_hash, _file_hash_async
-from core.utils import format_bytes
+from core.utils import format_bytes, detect_send_type, guess_mime
 
 log = logging.getLogger("guard.uploader")
 
@@ -119,13 +119,13 @@ async def dispatch_webhook_notification(filename: str, file_size: int, sender: s
     payload = {
         "embeds": [
             {
-                "title": "📥 New File Uploaded to Storage",
+                "title": "New File Uploaded to Storage",
                 "color": 5814783,
                 "fields": [
-                    {"name": "📁 Filename", "value": filename[:100] or "unknown", "inline": True},
-                    {"name": "📦 Size", "value": size_str, "inline": True},
-                    {"name": "👤 Sender", "value": sender or "unknown", "inline": True},
-                    {"name": "📌 Source", "value": group or "unknown", "inline": True}
+                    {"name": "Filename", "value": filename[:100] or "unknown", "inline": True},
+                    {"name": "Size", "value": size_str, "inline": True},
+                    {"name": "Sender", "value": sender or "unknown", "inline": True},
+                    {"name": "Source", "value": group or "unknown", "inline": True}
                 ],
                 "description": caption[:300] if caption else "No description",
                 "timestamp": datetime.now().isoformat()
@@ -135,7 +135,7 @@ async def dispatch_webhook_notification(filename: str, file_size: int, sender: s
     _webhook_queue.put_nowait((cfg.webhook_url, payload))
 
 
-# ── Caption ────────────────────────────────────────────────────
+# Caption logic
 
 
 def build_caption(
@@ -187,64 +187,31 @@ def build_caption(
     sender_clean = sender_name.replace(" ", "_")
     sender_clean = re.sub(r"[^\w\u0E00-\u0E7F\-]", "", sender_clean)
     if sender_clean:
-        lines.append(f"👤 #{sender_clean}")
+        lines.append(f"Sender: #{sender_clean}")
     else:
-        lines.append(f"👤 #{sender_name}")
+        lines.append(f"Sender: #{sender_name}")
     if sender_username:
-        lines.append(f"💬 @{sender_username}")
+        lines.append(f"Username: @{sender_username}")
     if for_album:
         if file_total > 0:
-            lines.append(f"🔢 {file_total} รูป")
+            lines.append(f"Total: {file_total} files")
     else:
         if filename:
-            lines.append(f"📁 {filename}")
+            lines.append(f"Filename: {filename}")
         if file_size:
-            lines.append(f"📦 {format_bytes(file_size)}")
+            lines.append(f"Size: {format_bytes(file_size)}")
     if original_caption:
-        lines.append(f"💬 {original_caption[:300]}")
+        lines.append(f"Caption: {original_caption[:300]}")
     if source_group_name:
-        lines.append(f"📌 {source_group_name}")
-    lines.append(f"📅 {date_str}")
+        lines.append(f"Source: {source_group_name}")
+    lines.append(f"Date: {date_str}")
     if file_total > 0 and not for_album:
-        lines.append(f"🔢 {file_idx}/{file_total}")
+        lines.append(f"Index: {file_idx}/{file_total}")
 
     return "\n".join(lines)
 
 
-# ── Media type ─────────────────────────────────────────────────
 
-_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v", ".3gp"}
-_PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
-
-
-def _detect_send_type(filepath: Path) -> str:
-    ext = filepath.suffix.lower()
-    if ext in _PHOTO_EXTS:
-        return "photo"
-    if ext in _VIDEO_EXTS:
-        return "video"
-    return "document"
-
-
-def _guess_mime(filepath: Path) -> str:
-    """Return a proper MIME type for the file based on its extension."""
-    mime, _ = mimetypes.guess_type(filepath.name)
-    if mime:
-        return mime
-    ext = filepath.suffix.lower()
-    fallback = {
-        ".mp4": "video/mp4", ".mkv": "video/x-matroska",
-        ".avi": "video/x-msvideo", ".mov": "video/quicktime",
-        ".webm": "video/webm", ".flv": "video/x-flv",
-        ".wmv": "video/x-ms-wmv", ".m4v": "video/x-m4v",
-        ".3gp": "video/3gpp",
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png", ".gif": "image/gif",
-        ".webp": "image/webp", ".bmp": "image/bmp",
-        ".pdf": "application/pdf", ".zip": "application/zip",
-        ".rar": "application/x-rar-compressed",
-    }
-    return fallback.get(ext, "application/octet-stream")
 
 
 def _build_doc_attributes(filepath: Path, send_type: str) -> list:
@@ -262,7 +229,7 @@ def _build_doc_attributes(filepath: Path, send_type: str) -> list:
     return attrs
 
 
-# ── Upload single ──────────────────────────────────────────────
+# Upload single file
 
 
 async def upload_single(
@@ -275,7 +242,7 @@ async def upload_single(
 ) -> int | None:
     if not filepath.exists():
         return None
-    stype = send_type or _detect_send_type(filepath)
+    stype = send_type or detect_send_type(filepath)
     log.info("upload_single: %s (%s)", filepath.name, stype)
 
     for attempt in range(4):
@@ -288,11 +255,11 @@ async def upload_single(
             if stype == "video":
                 kwargs["supports_streaming"] = True
                 kwargs["attributes"] = _build_doc_attributes(filepath, "video")
-                kwargs["mime_type"] = _guess_mime(filepath)
+                kwargs["mime_type"] = guess_mime(filepath)
             elif stype != "photo":
                 kwargs["force_document"] = True
                 kwargs["attributes"] = [DocumentAttributeFilename(file_name=filepath.name)]
-                kwargs["mime_type"] = _guess_mime(filepath)
+                kwargs["mime_type"] = guess_mime(filepath)
             msg = await client.send_file(storage_group_id, **kwargs)
             return msg.id
         except FloodWaitError as e:
@@ -306,7 +273,7 @@ async def upload_single(
     return None
 
 
-# ── Upload album (native) ──────────────────────────────────────
+# Upload album (native)
 
 
 async def upload_album(
@@ -318,52 +285,56 @@ async def upload_album(
     if not items:
         return None
 
-    chunks = [items[i:i + ALBUM_SIZE] for i in range(0, len(items), ALBUM_SIZE)]
-    first_msg_id = None
+    try:
+        chunks = [items[i:i + ALBUM_SIZE] for i in range(0, len(items), ALBUM_SIZE)]
+        first_msg_id = None
 
-    for chunk_idx, chunk in enumerate(chunks):
-        media_list = []
-        for fpath, stype in chunk:
-            if not fpath.exists():
+        for chunk_idx, chunk in enumerate(chunks):
+            media_list = []
+            for fpath, stype in chunk:
+                if not fpath.exists():
+                    continue
+                # Bug Fix: Catch exceptions on client.upload_file to prevent worker crash
+                try:
+                    file_obj = await client.upload_file(str(fpath))
+                except FloodWaitError as e:
+                    log.warning("FloodWait during album file upload: sleeping %d seconds", e.seconds)
+                    await asyncio.sleep(e.seconds)
+                    file_obj = await client.upload_file(str(fpath))
+
+                if stype == "photo":
+                    media_list.append(InputMediaUploadedPhoto(file=file_obj))
+                else:
+                    mime = guess_mime(fpath)
+                    attrs = _build_doc_attributes(fpath, stype)
+                    media_list.append(InputMediaUploadedDocument(
+                        file=file_obj,
+                        mime_type=mime,
+                        attributes=attrs,
+                    ))
+
+            if not media_list:
                 continue
-            file_obj = await client.upload_file(str(fpath))
-            if stype == "photo":
-                media_list.append(InputMediaUploadedPhoto(file=file_obj))
-            else:
-                mime = _guess_mime(fpath)
-                attrs = _build_doc_attributes(fpath, stype)
-                media_list.append(InputMediaUploadedDocument(
-                    file=file_obj,
-                    mime_type=mime,
-                    attributes=attrs,
-                ))
 
-        if not media_list:
-            continue
+            kwargs: dict[str, Any] = {}
+            if chunk_idx == 0 and caption:
+                kwargs["caption"] = caption[:1024]
 
-        kwargs: dict[str, Any] = {}
-        if chunk_idx == 0 and caption:
-            kwargs["caption"] = caption[:1024]
-
-        try:
             log.info("upload_album: %d files (chunk %d/%d)", len(media_list), chunk_idx + 1, len(chunks))
             msgs = await client.send_file(storage_group_id, file=media_list, **kwargs)
             if msgs:
                 first_msg_id = msgs[0].id if isinstance(msgs, list) else msgs.id
-        except FloodWaitError as e:
-            await asyncio.sleep(e.seconds)
-            return None
-        except Exception as e:
-            log.error("upload_album: %s", e)
-            return None
 
-        if chunk_idx < len(chunks) - 1:
-            await asyncio.sleep(ALBUM_GAP)
+            if chunk_idx < len(chunks) - 1:
+                await asyncio.sleep(ALBUM_GAP)
 
-    return first_msg_id
+        return first_msg_id
+    except Exception as e:
+        log.error("upload_album: failed to process album: %s", e)
+        return None
 
 
-# ── Upload worker (realtime Smart Mode) ───────────────────────
+# Upload worker (realtime Smart Mode)
 
 
 async def upload_worker(
@@ -429,7 +400,7 @@ async def upload_worker(
             if not fpath.exists() or is_uploaded(item[0]):
                 ACTIVE_UPLOADS.discard(item[0])
                 continue
-            media_items.append((fpath, _detect_send_type(fpath), item))
+            media_items.append((fpath, detect_send_type(fpath), item))
 
         if not media_items:
             return None
@@ -493,7 +464,10 @@ async def upload_worker(
                 singles.append(item)
 
         for ag_items in albums.values():
-            await _send_album(ag_items)
+            try:
+                await _send_album(ag_items)
+            except Exception as ae:
+                log.error("Failed to upload album in flush cycle: %s", ae)
             await asyncio.sleep(ALBUM_GAP)
 
         # Parallel upload for singles via gather + semaphore
@@ -553,7 +527,7 @@ async def upload_worker(
                 pass
 
 
-# ── Batch upload (manual) ─────────────────────────────────────
+# Batch upload (manual)
 
 
 async def batch_upload_files(
@@ -647,7 +621,7 @@ async def _upload_album_batch(client, storage_group_id, files, on_progress, base
         fpath = Path(bf["filepath"])
         if not fpath.exists() or is_uploaded(bf["filepath"]):
             continue
-        media_items.append((fpath, bf["filepath"], _detect_send_type(fpath), bf))
+        media_items.append((fpath, bf["filepath"], detect_send_type(fpath), bf))
 
     if not media_items:
         return {"success": 0, "failed": 0, "total_size": 0}
